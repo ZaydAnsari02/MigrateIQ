@@ -1,0 +1,125 @@
+{
+  "comparison_id": "550e8400-e29b-41d4-a716-446655440000",
+  "timestamp": "2024-01-15T10:30:45.123456Z",
+  "inputs": {
+    "twbx_file": "sales_dashboard.twbx",
+    "pbix_file": "sales_dashboard.pbix"
+  },
+  "overall_result": "FAIL",
+  "categories": {
+    "data": {
+      "result": "PASS",
+      "tolerance_threshold_pct": 0.5,
+      "tables_compared": 3,
+      "details": [
+        {
+          "table_name": "Sales",
+          "result": "PASS",
+          "row_count_twbx": 10000,
+          "row_count_pbix": 10000,
+          "row_count_diff_pct": 0.0,
+          "columns_matched": [
+            "SalesID",
+            "CustomerID",
+            "Amount",
+            "Date",
+            "Region"
+          ],
+          "columns_missing_in_pbix": [],
+          "columns_missing_in_twbx": [],
+          "column_type_mismatches": [],
+          "failure_reasons": []
+        },
+        {
+          "table_name": "Customers",
+          "result": "PASS",
+          "row_count_twbx": 5000,
+          "row_count_pbix": 5000,
+          "row_count_diff_pct": 0.0,
+          "columns_matched": [
+            "CustomerID",
+            "Name",
+            "Email",
+            "Country"
+          ],
+          "columns_missing_in_pbix": [],
+          "columns_missing_in_twbx": [],
+          "column_type_mismatches": [],
+          "failure_reasons": []
+        },
+        {
+          "table_name": "Products",
+          "result": "PASS",
+          "row_count_twbx": 500,
+          "row_count_pbix": 500,
+          "row_count_diff_pct": 0.0,
+          "columns_matched": [
+            "ProductID",
+            "ProductName",
+            "Category",
+            "Price"
+          ],
+          "columns_missing_in_pbix": [],
+          "columns_missing_in_twbx": [],
+          "column_type_mismatches": [],
+          "failure_reasons": []
+        }
+      ]
+    },
+    "semantic_model": {
+      "result": "FAIL",
+      "measures_compared": 4,
+      "details": {
+        "measures_matched": [
+          "Total Sales",
+          "Count of Orders"
+        ],
+        "measures_missing_in_pbix": [
+          "Average Order Value",
+          "Year-to-Date Sales"
+        ],
+        "measures_missing_in_twbx": [],
+        "expression_mismatches": [],
+        "data_type_mismatches": [],
+        "failure_reasons": [
+          "Measure 'Average Order Value' missing in PBIX",
+          "Measure 'Year-to-Date Sales' missing in PBIX"
+        ]
+      }
+    },
+    "relationships": {
+      "result": "FAIL",
+      "relationships_compared": 3,
+      "details": {
+        "relationships_matched": [
+          {
+            "from": "Sales[CustomerID]",
+            "to": "Customers[CustomerID]",
+            "cardinality": "many-to-one"
+          },
+          {
+            "from": "Sales[ProductID]",
+            "to": "Products[ProductID]",
+            "cardinality": "many-to-one"
+          }
+        ],
+        "relationships_missing_in_pbix": [
+          "Customers[CountryID] -> Countries[CountryID]"
+        ],
+        "relationships_missing_in_twbx": [],
+        "cardinality_mismatches": [],
+        "failure_reasons": [
+          "Relationship missing in PBIX: Customers[CountryID] -> Countries[CountryID]"
+        ]
+      }
+    }
+  },
+  "summary": {
+    "total_failures": 2,
+    "failure_categories": [
+      "semantic_model",
+      "relationships"
+    ],
+    "notes": "2 measure(s) have semantic model mismatches; 1 relationship issue(s) detected"
+  }
+}
