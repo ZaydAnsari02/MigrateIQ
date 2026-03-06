@@ -1,0 +1,76 @@
+{
+  "comparison_id": "2d0b2461-3af7-4ee0-9e2a-de53bc71a199",
+  "timestamp": "2026-03-06T05:40:50.700849Z",
+  "inputs": {
+    "twbx_file": "demo_fail_model.twbx",
+    "pbix_file": "demo_fail_model.pbix"
+  },
+  "overall_result": "FAIL",
+  "categories": {
+    "data": {
+      "result": "FAIL",
+      "tolerance_threshold_pct": 0.5,
+      "tables_compared": 2,
+      "details": [
+        {
+          "table_name": "Orders",
+          "result": "FAIL",
+          "row_count_twbx": null,
+          "row_count_pbix": null,
+          "row_count_diff_pct": null,
+          "columns_matched": [],
+          "columns_missing_in_pbix": [],
+          "columns_missing_in_twbx": [],
+          "column_type_mismatches": [],
+          "failure_reasons": [
+            "Table 'Orders' missing in PBIX"
+          ]
+        },
+        {
+          "table_name": "Regions",
+          "result": "FAIL",
+          "row_count_twbx": null,
+          "row_count_pbix": null,
+          "row_count_diff_pct": null,
+          "columns_matched": [],
+          "columns_missing_in_pbix": [],
+          "columns_missing_in_twbx": [],
+          "column_type_mismatches": [],
+          "failure_reasons": [
+            "Table 'Regions' missing in PBIX"
+          ]
+        }
+      ]
+    },
+    "semantic_model": {
+      "result": "PASS",
+      "measures_compared": 0,
+      "details": {
+        "measures_matched": [],
+        "measures_missing_in_pbix": [],
+        "measures_missing_in_twbx": [],
+        "expression_mismatches": [],
+        "data_type_mismatches": [],
+        "failure_reasons": []
+      }
+    },
+    "relationships": {
+      "result": "PASS",
+      "relationships_compared": 0,
+      "details": {
+        "relationships_matched": [],
+        "relationships_missing_in_pbix": [],
+        "relationships_missing_in_twbx": [],
+        "cardinality_mismatches": [],
+        "failure_reasons": []
+      }
+    }
+  },
+  "summary": {
+    "total_failures": 1,
+    "failure_categories": [
+      "data"
+    ],
+    "notes": "2 table(s) have data mismatches"
+  }
+}
