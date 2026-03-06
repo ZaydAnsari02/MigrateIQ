@@ -12,6 +12,7 @@ from comparators.data_comparator import DataComparator
 from comparators.model_comparator import ModelComparator
 from comparators.relationship_comparator import RelationshipComparator
 from output.result_builder import ComparisonResultBuilder
+import config
 
 
 def example_programmatic_usage():
@@ -37,7 +38,7 @@ def example_programmatic_usage():
     pbix_relationships = pbix_parser.get_relationships()
 
     # Compare data
-    data_comparator = DataComparator(tolerance_pct=0.5)
+    data_comparator = DataComparator(tolerance_pct=config.TOLERANCE_PCT)
     data_result, data_details = data_comparator.compare_tables(
         twbx_tables,
         pbix_tables,
@@ -75,7 +76,8 @@ def example_programmatic_usage():
     )
 
     # Save result
-    result_builder.save_result(result, "comparison_result.json")
+    output_path = str(config.OUTPUT_DIR / config.DEFAULT_OUTPUT_FILENAME)
+    result_builder.save_result(result, output_path)
 
     # Print summary
     ComparisonResultBuilder.print_result_summary(result)
@@ -169,7 +171,7 @@ def example_batch_comparison():
                 relationships_details,
             )
 
-            output_path = f"result_{Path(twbx_file).stem}.json"
+            output_path = str(config.OUTPUT_DIR / f"result_{Path(twbx_file).stem}.json")
             builder.save_result(result, output_path)
 
             results.append({

@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import config
+
 from parsers.twbx_parser import TwbxParser
 from parsers.pbix_parser import PbixParser
 from comparators.data_comparator import DataComparator
@@ -26,7 +28,7 @@ from output.result_builder import ComparisonResultBuilder
 
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging."""
-    level = logging.DEBUG if verbose else logging.INFO
+    level = logging.DEBUG if verbose else getattr(logging, config.LOG_LEVEL, logging.INFO)
     logging.basicConfig(
         level=level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -113,7 +115,7 @@ def compare_reports(
 
         # Compare data
         logger.info("Comparing data...")
-        data_comparator = DataComparator()
+        data_comparator = DataComparator(tolerance_pct=config.TOLERANCE_PCT)
         data_result, data_details = data_comparator.compare_tables(
             twbx_tables,
             pbix_tables,
@@ -151,7 +153,14 @@ def compare_reports(
         )
 
         # Save result
-        output_file = result_builder.save_result(result, output_path)
+        # If no explicit output path was given, build a descriptive unique filename.
+        if output_path:
+            output_file = result_builder.save_result(result, output_path)
+        else:
+            auto_path = result_builder.generate_output_filename(
+                result["overall_result"]
+            )
+            output_file = result_builder.save_result(result, str(auto_path))
         logger.info(f"Comparison result saved to {output_file}")
 
         # Print summary
@@ -198,14 +207,18 @@ Examples:
 
     parser.add_argument(
         "--output",
-        default="comparison_result.json",
+        default=None,
         metavar="PATH",
-        help="Path to save the JSON result file (default: comparison_result.json)",
+        help=(
+            "Path to save the JSON result file. "
+            "Defaults to output_json/{twbx}_vs_{pbix}_{PASS|FAIL}_{timestamp}.json"
+        ),
     )
 
     parser.add_argument(
         "--verbose",
         action="store_true",
+        default=config.VERBOSE,
         help="Enable verbose logging for detailed per-column information",
     )
 
