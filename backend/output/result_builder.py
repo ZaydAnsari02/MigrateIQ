@@ -2,11 +2,9 @@
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, Any, List
 from pathlib import Path
-
-import config
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +67,7 @@ class ComparisonResultBuilder:
         # Build data section
         data_section = {
             "result": data_result,
-            "tolerance_threshold_pct": config.TOLERANCE_PCT,
+            "tolerance_threshold_pct": 0.5,
             "tables_compared": len(data_details),
             "details": data_details,
         }
@@ -143,44 +141,6 @@ class ComparisonResultBuilder:
             notes.append(f"{len(rel_failures)} relationship issue(s) detected")
 
         return "; ".join(notes) if notes else "All checks passed"
-
-    def generate_output_filename(
-        self,
-        overall_result: str,
-        output_dir: Path | None = None,
-    ) -> Path:
-        """
-        Build a descriptive, unique output file path.
-
-        Format: {twbx_stem}_vs_{pbix_stem}_{PASS|FAIL}_{YYYYMMDD_HHMMSS}.json
-        If a file with that name already exists a numeric suffix (_1, _2, …)
-        is appended so previous runs are never overwritten.
-
-        Args:
-            overall_result: "PASS" or "FAIL"
-            output_dir: Directory to save into (defaults to config.OUTPUT_DIR)
-
-        Returns:
-            A Path that does not yet exist on disk.
-        """
-        if output_dir is None:
-            output_dir = config.OUTPUT_DIR
-
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        twbx_stem = Path(self.twbx_file).stem
-        pbix_stem = Path(self.pbix_file).stem
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        base_name = f"{twbx_stem}_vs_{pbix_stem}_{overall_result}_{ts}"
-
-        candidate = output_dir / f"{base_name}.json"
-        counter = 1
-        while candidate.exists():
-            candidate = output_dir / f"{base_name}_{counter}.json"
-            counter += 1
-
-        return candidate
 
     def save_result(self, result: Dict[str, Any], output_path: str) -> str:
         """

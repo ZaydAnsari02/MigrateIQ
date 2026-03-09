@@ -1,16 +1,67 @@
 """Semantic model comparison logic."""
 import logging
+import re
 from typing import Dict, List, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Shared normalisation (mirrors data_comparator rules)
+# ---------------------------------------------------------------------------
+
+def _norm_name(name: str) -> str:
+    """
+    Normalise a measure / column name for comparison.
+    Rules: case-insensitive, spaces and underscores are equivalent.
+    """
+    return re.sub(r"[ _]+", "_", name.lower().strip())
+
+
+# ---------------------------------------------------------------------------
+# Type equivalence (reused from data_comparator logic)
+# ---------------------------------------------------------------------------
+_TYPE_GROUPS: Dict[str, str] = {
+    "string":   "text",   "str": "text",  "text": "text",
+    "wstr":     "text",   "object": "text",
+    "integer":  "integer","int": "integer","int64": "integer",
+    "int32":    "integer","int16": "integer","int8": "integer",
+    "long":     "integer",
+    "real":     "decimal","double": "decimal","float": "decimal",
+    "float64":  "decimal","float32": "decimal","decimal": "decimal",
+    "currency": "decimal",
+    "boolean":  "boolean","bool": "boolean",
+    "date":     "datetime","datetime": "datetime",
+    "datetime64[ns]": "datetime","timestamp": "datetime","time": "datetime",
+    "unknown":  "unknown",
+}
+
+
+def _type_group(t: str) -> str:
+    return _TYPE_GROUPS.get(t.lower().strip(), t.lower().strip())
+
+
+def _types_compatible(t1: str, t2: str) -> bool:
+    g1, g2 = _type_group(t1), _type_group(t2)
+    # 'unknown' on either side → treat as compatible (can't know)
+    if "unknown" in (g1, g2):
+        return True
+    return g1 == g2
+
+
+# ---------------------------------------------------------------------------
+# ModelComparator
+# ---------------------------------------------------------------------------
+
 class ModelComparator:
     """Compare semantic models (measures, calculated fields) between TWBX and PBIX."""
 
     def __init__(self):
-        """Initialize the model comparator."""
         pass
+
+    # ------------------------------------------------------------------
+    # Measures
+    # ------------------------------------------------------------------
 
     def compare_measures(
         self,
@@ -21,16 +72,14 @@ class ModelComparator:
         """
         Compare measures between TWBX and PBIX.
 
-        Args:
-            twbx_measures: List of measures from TWBX
-            pbix_measures: List of measures from PBIX
-            verbose: If True, log detailed information
+        Matching: case-insensitive, spaces ≈ underscores.
+        Type comparison uses the equivalence map — compatible types PASS.
 
         Returns:
-            Tuple of (result, details)
+            (result, details)
         """
         result = "PASS"
-        details = {
+        details: Dict[str, Any] = {
             "measures_matched": [],
             "measures_missing_in_pbix": [],
             "measures_missing_in_twbx": [],
@@ -39,79 +88,80 @@ class ModelComparator:
             "failure_reasons": [],
         }
 
-        # Create lookup dictionaries by name (case-insensitive)
-        twbx_by_name = {m["name"].lower(): m for m in twbx_measures}
-        pbix_by_name = {m["name"].lower(): m for m in pbix_measures}
+        # Build normalised-name → measure lookup
+        twbx_by_norm = {_norm_name(m["name"]): m for m in twbx_measures}
+        pbix_by_norm  = {_norm_name(m["name"]): m for m in pbix_measures}
 
-        all_measure_names = set(twbx_by_name.keys()) | set(pbix_by_name.keys())
+        all_keys = set(twbx_by_norm) | set(pbix_by_norm)
+        logger.info(f"Comparing {len(all_keys)} measures")
 
-        logger.info(f"Comparing {len(all_measure_names)} measures")
+        for key in sorted(all_keys):
+            tw = twbx_by_norm.get(key)
+            pb = pbix_by_norm.get(key)
 
-        for measure_key in sorted(all_measure_names):
-            twbx_measure = twbx_by_name.get(measure_key)
-            pbix_measure = pbix_by_name.get(measure_key)
+            if tw and pb:
+                details["measures_matched"].append(tw["name"])
 
-            if twbx_measure and pbix_measure:
-                # Both measures exist
-                details["measures_matched"].append(twbx_measure["name"])
-
-                # Compare expressions
-                twbx_expr = twbx_measure.get("expression", "").strip()
-                pbix_expr = pbix_measure.get("expression", "").strip()
-
-                if twbx_expr and pbix_expr and twbx_expr != pbix_expr:
-                    details["expression_mismatches"].append(
-                        {
-                            "measure": twbx_measure["name"],
-                            "twbx_expression": twbx_expr[:100],  # Truncate for readability
-                            "pbix_expression": pbix_expr[:100],
-                        }
-                    )
+                # Expression comparison
+                tw_expr = tw.get("expression", "").strip()
+                pb_expr = pb.get("expression", "").strip()
+                if tw_expr and pb_expr and tw_expr != pb_expr:
+                    details["expression_mismatches"].append({
+                        "measure":          tw["name"],
+                        "twbx_expression":  tw_expr[:100],
+                        "pbix_expression":  pb_expr[:100],
+                    })
                     details["failure_reasons"].append(
-                        f"Expression mismatch for measure {twbx_measure['name']}"
+                        f"Expression mismatch for measure '{tw['name']}'"
                     )
                     result = "FAIL"
-
                     if verbose:
                         logger.warning(
-                            f"Measure '{twbx_measure['name']}' expressions differ"
+                            f"Measure '{tw['name']}': expressions differ"
                         )
 
-                # Compare data types
-                twbx_type = twbx_measure.get("data_type", "unknown")
-                pbix_type = pbix_measure.get("data_type", "unknown")
-
-                if twbx_type != pbix_type:
-                    details["data_type_mismatches"].append(
-                        {
-                            "measure": twbx_measure["name"],
-                            "twbx_type": twbx_type,
-                            "pbix_type": pbix_type,
-                        }
-                    )
+                # Type comparison (with equivalence map)
+                tw_type = tw.get("data_type", "unknown")
+                pb_type = pb.get("data_type", "unknown")
+                if not _types_compatible(tw_type, pb_type):
+                    details["data_type_mismatches"].append({
+                        "measure":      tw["name"],
+                        "twbx_type":    tw_type,
+                        "pbix_type":    pb_type,
+                        "twbx_canonical": _type_group(tw_type),
+                        "pbix_canonical": _type_group(pb_type),
+                    })
                     details["failure_reasons"].append(
-                        f"Data type mismatch for measure {twbx_measure['name']}: {twbx_type} vs {pbix_type}"
+                        f"Incompatible type for measure '{tw['name']}': "
+                        f"TWBX={tw_type} ({_type_group(tw_type)}) "
+                        f"PBIX={pb_type} ({_type_group(pb_type)})"
                     )
                     result = "FAIL"
 
-            elif twbx_measure:
-                details["measures_missing_in_pbix"].append(twbx_measure["name"])
+            elif tw:
+                details["measures_missing_in_pbix"].append(tw["name"])
                 details["failure_reasons"].append(
-                    f"Measure '{twbx_measure['name']}' missing in PBIX"
+                    f"Measure '{tw['name']}' missing in PBIX"
                 )
                 result = "FAIL"
 
-            else:  # pbix_measure
-                details["measures_missing_in_twbx"].append(pbix_measure["name"])
+            else:
+                details["measures_missing_in_twbx"].append(pb["name"])
                 details["failure_reasons"].append(
-                    f"Measure '{pbix_measure['name']}' missing in TWBX"
+                    f"Measure '{pb['name']}' missing in TWBX"
                 )
                 result = "FAIL"
 
         if verbose:
-            logger.debug(f"Measure comparison: {len(details['measures_matched'])} matched")
+            logger.debug(
+                f"Measure comparison: {len(details['measures_matched'])} matched"
+            )
 
         return result, details
+
+    # ------------------------------------------------------------------
+    # Calculated columns
+    # ------------------------------------------------------------------
 
     def compare_calculated_columns(
         self,
@@ -119,47 +169,38 @@ class ModelComparator:
         pbix_columns: List[Dict[str, Any]],
         verbose: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
-        """
-        Compare calculated columns between TWBX and PBIX.
-
-        Args:
-            twbx_columns: List of calculated columns from TWBX
-            pbix_columns: List of calculated columns from PBIX
-            verbose: If True, log detailed information
-
-        Returns:
-            Tuple of (result, details)
-        """
-        # Similar to measures, but focusing on calculated columns
+        """Compare calculated columns between TWBX and PBIX."""
         result = "PASS"
-        details = {
+        details: Dict[str, Any] = {
             "columns_matched": [],
             "columns_missing_in_pbix": [],
             "columns_missing_in_twbx": [],
             "failure_reasons": [],
         }
 
-        twbx_by_name = {col["name"].lower(): col for col in twbx_columns}
-        pbix_by_name = {col["name"].lower(): col for col in pbix_columns}
+        twbx_by_norm = {_norm_name(c["name"]): c for c in twbx_columns}
+        pbix_by_norm  = {_norm_name(c["name"]): c for c in pbix_columns}
+        all_keys = set(twbx_by_norm) | set(pbix_by_norm)
 
-        all_col_names = set(twbx_by_name.keys()) | set(pbix_by_name.keys())
+        logger.info(f"Comparing {len(all_keys)} calculated columns")
 
-        logger.info(f"Comparing {len(all_col_names)} calculated columns")
-
-        for col_key in sorted(all_col_names):
-            twbx_col = twbx_by_name.get(col_key)
-            pbix_col = pbix_by_name.get(col_key)
-
-            if twbx_col and pbix_col:
-                details["columns_matched"].append(twbx_col["name"])
-            elif twbx_col:
-                details["columns_missing_in_pbix"].append(twbx_col["name"])
+        for key in sorted(all_keys):
+            tw = twbx_by_norm.get(key)
+            pb = pbix_by_norm.get(key)
+            if tw and pb:
+                details["columns_matched"].append(tw["name"])
+            elif tw:
+                details["columns_missing_in_pbix"].append(tw["name"])
                 result = "FAIL"
             else:
-                details["columns_missing_in_twbx"].append(pbix_col["name"])
+                details["columns_missing_in_twbx"].append(pb["name"])
                 result = "FAIL"
 
         return result, details
+
+    # ------------------------------------------------------------------
+    # Table structures
+    # ------------------------------------------------------------------
 
     def compare_tables_structure(
         self,
@@ -168,65 +209,129 @@ class ModelComparator:
         verbose: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
         """
-        Compare table structures (names, display names, columns).
+        Compare table structures (names, column names, column types).
 
-        Args:
-            twbx_tables: Table structures from TWBX
-            pbix_tables: Table structures from PBIX
-            verbose: If True, log detailed information
-
-        Returns:
-            Tuple of (result, details)
+        Uses the same normalisation rules as DataComparator:
+          • Case-insensitive
+          • Spaces ≈ underscores
+          • Type equivalence map for compatible-type PASS
         """
         result = "PASS"
-        details = {
+        details: Dict[str, Any] = {
             "tables_matched": [],
             "tables_missing_in_pbix": [],
             "tables_missing_in_twbx": [],
             "column_mismatches": [],
             "failure_reasons": [],
+            "notes": [],
         }
 
-        twbx_by_name = {name.lower(): name for name in twbx_tables.keys()}
-        pbix_by_name = {name.lower(): name for name in pbix_tables.keys()}
+        twbx_by_norm = {_norm_name(n): n for n in twbx_tables}
+        pbix_by_norm  = {_norm_name(n): n for n in pbix_tables}
+        all_keys = set(twbx_by_norm) | set(pbix_by_norm)
 
-        all_table_names = set(twbx_by_name.keys()) | set(pbix_by_name.keys())
+        logger.info(f"Comparing {len(all_keys)} table structures")
 
-        logger.info(f"Comparing {len(all_table_names)} table structures")
+        for key in sorted(all_keys):
+            tw_name = twbx_by_norm.get(key)
+            pb_name = pbix_by_norm.get(key)
 
-        for table_key in sorted(all_table_names):
-            twbx_name = twbx_by_name.get(table_key)
-            pbix_name = pbix_by_name.get(table_key)
+            if tw_name and pb_name:
+                details["tables_matched"].append(tw_name)
 
-            if twbx_name and pbix_name:
-                details["tables_matched"].append(twbx_name)
-
-                # Compare columns
-                twbx_table = twbx_tables[twbx_name]
-                pbix_table = pbix_tables[pbix_name]
-
-                twbx_cols = {col["name"].lower() for col in twbx_table.get("columns", [])}
-                pbix_cols = {
-                    col["name"].lower() for col in pbix_table.get("columns", [])
-                }
-
-                if twbx_cols != pbix_cols:
-                    result = "FAIL"
-                    details["failure_reasons"].append(
-                        f"Column mismatch in table {twbx_name}"
+                # Note if display names differ even though normalised names match
+                if tw_name != pb_name:
+                    details["notes"].append(
+                        f"Table name differs: TWBX='{tw_name}' PBIX='{pb_name}'"
                     )
 
-            elif twbx_name:
-                details["tables_missing_in_pbix"].append(twbx_name)
+                tw_table = twbx_tables[tw_name]
+                pb_table = pbix_tables[pb_name]
+
+                # Build normalised column maps
+                tw_col_map = {
+                    _norm_name(c["name"]): c
+                    for c in tw_table.get("columns", [])
+                }
+                pb_col_map = {
+                    _norm_name(c["name"]): c
+                    for c in pb_table.get("columns", [])
+                }
+
+                tw_norm = set(tw_col_map)
+                pb_norm = set(pb_col_map)
+
+                missing_in_pbix = sorted(
+                    tw_col_map[n]["name"] for n in tw_norm - pb_norm
+                )
+                missing_in_twbx = sorted(
+                    pb_col_map[n]["name"] for n in pb_norm - tw_norm
+                )
+
+                col_mismatch: Dict[str, Any] = {
+                    "table": tw_name,
+                    "columns_missing_in_pbix": missing_in_pbix,
+                    "columns_missing_in_twbx": missing_in_twbx,
+                    "type_mismatches": [],
+                }
+
+                if missing_in_pbix or missing_in_twbx:
+                    result = "FAIL"
+                    if missing_in_pbix:
+                        details["failure_reasons"].append(
+                            f"Table '{tw_name}': columns missing in PBIX: "
+                            f"{', '.join(missing_in_pbix)}"
+                        )
+                    if missing_in_twbx:
+                        details["failure_reasons"].append(
+                            f"Table '{tw_name}': columns missing in TWBX: "
+                            f"{', '.join(missing_in_twbx)}"
+                        )
+
+                # Type check on matched columns
+                for norm_col in tw_norm & pb_norm:
+                    tw_col = tw_col_map[norm_col]
+                    pb_col = pb_col_map[norm_col]
+                    tw_type = tw_col.get("data_type", "unknown")
+                    pb_type = pb_col.get("data_type", "unknown")
+                    if not _types_compatible(tw_type, pb_type):
+                        col_mismatch["type_mismatches"].append({
+                            "column":           tw_col["name"],
+                            "twbx_type":        tw_type,
+                            "pbix_type":        pb_type,
+                            "twbx_canonical":   _type_group(tw_type),
+                            "pbix_canonical":   _type_group(pb_type),
+                        })
+                        result = "FAIL"
+                        details["failure_reasons"].append(
+                            f"Table '{tw_name}', column '{tw_col['name']}': "
+                            f"incompatible types TWBX={tw_type} "
+                            f"PBIX={pb_type}"
+                        )
+
+                if (col_mismatch["columns_missing_in_pbix"]
+                        or col_mismatch["columns_missing_in_twbx"]
+                        or col_mismatch["type_mismatches"]):
+                    details["column_mismatches"].append(col_mismatch)
+
+            elif tw_name:
+                details["tables_missing_in_pbix"].append(tw_name)
                 result = "FAIL"
-                details["failure_reasons"].append(f"Table '{twbx_name}' missing in PBIX")
+                details["failure_reasons"].append(
+                    f"Table '{tw_name}' missing in PBIX"
+                )
 
             else:
-                details["tables_missing_in_twbx"].append(pbix_name)
+                details["tables_missing_in_twbx"].append(pb_name)
                 result = "FAIL"
-                details["failure_reasons"].append(f"Table '{pbix_name}' missing in TWBX")
+                details["failure_reasons"].append(
+                    f"Table '{pb_name}' missing in TWBX"
+                )
 
         if verbose:
-            logger.debug(f"Table structure comparison: {len(details['tables_matched'])} matched")
+            logger.debug(
+                f"Table structure comparison: "
+                f"{len(details['tables_matched'])} matched"
+            )
 
         return result, details

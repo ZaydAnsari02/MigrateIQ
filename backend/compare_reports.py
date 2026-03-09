@@ -2,22 +2,22 @@
 """
 Compare Tableau TWBX and Power BI PBIX files.
 
-This CLI tool validates that two BI reports represent the same data,
-semantic model, and relationships by comparing their structures and content.
-
 Usage:
     python compare_reports.py --twbx path/to/file.twbx --pbix path/to/file.pbix
     python compare_reports.py --twbx file.twbx --pbix file.pbix --output /path/to/output.json --verbose
+
+When --output is omitted every run is saved to the results/ folder with a
+timestamp in the filename so runs never overwrite each other:
+    results/result_pass_20260309_120834.json
+    results/result_fail_20260309_120834.json
 """
 
 import argparse
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
-
-import config
-
 from parsers.twbx_parser import TwbxParser
 from parsers.pbix_parser import PbixParser
 from comparators.data_comparator import DataComparator
@@ -26,121 +26,154 @@ from comparators.relationship_comparator import RelationshipComparator
 from output.result_builder import ComparisonResultBuilder
 
 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging."""
-    level = logging.DEBUG if verbose else getattr(logging, config.LOG_LEVEL, logging.INFO)
+    level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
 
+# ---------------------------------------------------------------------------
+# Input validation
+# ---------------------------------------------------------------------------
+
 def validate_input_files(twbx_path: str, pbix_path: str) -> bool:
-    """Validate that input files exist and are accessible."""
+    """Validate that input files exist and have the right extensions."""
     twbx = Path(twbx_path)
     pbix = Path(pbix_path)
 
     if not twbx.exists():
         logging.error(f"TWBX file not found: {twbx_path}")
         return False
-
     if not pbix.exists():
         logging.error(f"PBIX file not found: {pbix_path}")
         return False
-
-    if not twbx.suffix.lower() == ".twbx":
+    if twbx.suffix.lower() != ".twbx":
         logging.error(f"Input file is not a .twbx file: {twbx_path}")
         return False
-
-    if not pbix.suffix.lower() == ".pbix":
+    if pbix.suffix.lower() != ".pbix":
         logging.error(f"Input file is not a .pbix file: {pbix_path}")
         return False
 
     return True
 
 
+# ---------------------------------------------------------------------------
+# Output path resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_output_path(overall_result: str) -> str:
+    """
+    Return filename based on PASS/FAIL.
+    Saved in current execution directory.
+    """
+
+    if overall_result.upper() == "PASS":
+        return "result_pass.json"
+    else:
+        return "result_fail.json"
+
+
+# ---------------------------------------------------------------------------
+# Main comparison logic
+# ---------------------------------------------------------------------------
+
 def compare_reports(
     twbx_path: str,
     pbix_path: str,
-    output_path: str,
+    output_path: Optional[str],
     verbose: bool = False,
 ) -> int:
     """
-    Main comparison logic.
+    Run the full comparison pipeline and save the result.
 
     Args:
-        twbx_path: Path to TWBX file
-        pbix_path: Path to PBIX file
-        output_path: Path to save JSON result
-        verbose: Enable verbose logging
+        twbx_path:   Path to TWBX file.
+        pbix_path:   Path to PBIX file.
+        output_path: Explicit save path, or None to auto-route into results/.
+        verbose:     Enable verbose logging.
 
     Returns:
-        Exit code (0 for success, 1 for errors)
+        0 if overall result is PASS, 1 otherwise.
     """
     setup_logging(verbose)
     logger = logging.getLogger(__name__)
 
+    # Capture run timestamp once — same value used in log lines and filename.
+    run_dt = datetime.now()
+    run_timestamp = run_dt.strftime("%Y%m%d_%H%M%S")
+
     logger.info("Starting report comparison")
+    logger.info(f"Run timestamp : {run_dt.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"TWBX: {twbx_path}")
     logger.info(f"PBIX: {pbix_path}")
 
-    # Validate inputs
     if not validate_input_files(twbx_path, pbix_path):
         return 1
 
     try:
-        # Parse TWBX
+        # ── Parse TWBX ──────────────────────────────────────────────────
         logger.info("Parsing TWBX file...")
         twbx_parser = TwbxParser(twbx_path)
         twbx_parser.parse()
 
-        twbx_tables = twbx_parser.get_data_tables()
-        twbx_datasources = twbx_parser.get_datasources()
-        twbx_measures = twbx_parser.get_measures()
+        twbx_tables        = twbx_parser.get_data_tables()
+        twbx_datasources   = twbx_parser.get_datasources()
+        twbx_measures      = twbx_parser.get_measures()
         twbx_relationships = twbx_parser.get_relationships()
 
-        logger.info(f"TWBX: Found {len(twbx_tables)} tables, {len(twbx_measures)} measures, {len(twbx_relationships)} relationships")
+        logger.info(
+            f"TWBX: Found {len(twbx_tables)} tables, "
+            f"{len(twbx_measures)} measures, "
+            f"{len(twbx_relationships)} relationships"
+        )
 
-        # Parse PBIX
+        # ── Parse PBIX ──────────────────────────────────────────────────
         logger.info("Parsing PBIX file...")
         pbix_parser = PbixParser(pbix_path)
         pbix_parser.parse()
 
-        pbix_tables = pbix_parser.get_data_tables()
-        pbix_measures = pbix_parser.get_measures()
-        pbix_relationships = pbix_parser.get_relationships()
+        pbix_tables           = pbix_parser.get_data_tables()
+        pbix_measures         = pbix_parser.get_measures()
+        pbix_relationships    = pbix_parser.get_relationships()
         pbix_tables_structure = pbix_parser.get_tables()
 
-        logger.info(f"PBIX: Found {len(pbix_tables)} tables, {len(pbix_measures)} measures, {len(pbix_relationships)} relationships")
-
-        # Compare data
-        logger.info("Comparing data...")
-        data_comparator = DataComparator(tolerance_pct=config.TOLERANCE_PCT)
-        data_result, data_details = data_comparator.compare_tables(
-            twbx_tables,
-            pbix_tables,
-            verbose=verbose,
+        logger.info(
+            f"PBIX: Found {len(pbix_tables)} tables, "
+            f"{len(pbix_measures)} measures, "
+            f"{len(pbix_relationships)} relationships"
         )
 
-        # Compare semantic model
+        # ── Compare data ────────────────────────────────────────────────
+        logger.info("Comparing data...")
+        data_comparator = DataComparator()
+        data_result, data_details = data_comparator.compare_tables(
+            twbx_tables, pbix_tables, verbose=verbose
+        )
+
+        # ── Compare semantic model ───────────────────────────────────────
         logger.info("Comparing semantic model...")
         model_comparator = ModelComparator()
         model_result, model_details = model_comparator.compare_measures(
-            twbx_measures,
-            pbix_measures,
-            verbose=verbose,
+            twbx_measures, pbix_measures, verbose=verbose
         )
 
-        # Compare relationships
+        # ── Compare relationships ────────────────────────────────────────
         logger.info("Comparing relationships...")
         relationship_comparator = RelationshipComparator()
-        relationships_result, relationships_details = relationship_comparator.compare_relationships(
-            twbx_relationships,
-            pbix_relationships,
-            verbose=verbose,
+        relationships_result, relationships_details = (
+            relationship_comparator.compare_relationships(
+                twbx_relationships, pbix_relationships, verbose=verbose
+            )
         )
 
-        # Build and save result
+        # ── Build result ─────────────────────────────────────────────────
         logger.info("Building result...")
         result_builder = ComparisonResultBuilder(twbx_path, pbix_path)
         result = result_builder.build_result(
@@ -152,31 +185,39 @@ def compare_reports(
             relationships_details,
         )
 
-        # Save result
-        # If no explicit output path was given, build a descriptive unique filename.
+        # ── Resolve output path and save ─────────────────────────────────
+        # Determine overall result explicitly
+        overall_status = "PASS"
+        if data_result == "FAIL" or model_result == "FAIL" or relationships_result == "FAIL":
+                overall_status = "FAIL"
+
+        # Use API-provided output path if available
         if output_path:
-            output_file = result_builder.save_result(result, output_path)
+            resolved_path = output_path
         else:
-            auto_path = result_builder.generate_output_filename(
-                result["overall_result"]
-            )
-            output_file = result_builder.save_result(result, str(auto_path))
+            resolved_path = _resolve_output_path(overall_status)
+
+        Path(resolved_path).parent.mkdir(parents=True, exist_ok=True)
+        output_file = result_builder.save_result(result, resolved_path)
         logger.info(f"Comparison result saved to {output_file}")
 
-        # Print summary
+        # ── Print summary ────────────────────────────────────────────────
         ComparisonResultBuilder.print_result_summary(result)
 
-        # Cleanup
+        # ── Cleanup ──────────────────────────────────────────────────────
         twbx_parser.cleanup()
         pbix_parser.cleanup()
 
-        # Return exit code based on result
         return 0 if result["overall_result"] == "PASS" else 1
 
     except Exception as e:
         logger.error(f"Error during comparison: {e}", exc_info=True)
         return 1
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main():
     """CLI entry point."""
@@ -185,8 +226,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Auto-saves to results/result_pass_<timestamp>.json or results/result_fail_<timestamp>.json
   python compare_reports.py --twbx report.twbx --pbix report.pbix
-  python compare_reports.py --twbx report.twbx --pbix report.pbix --output comparison_result.json
+
+  # Save to an explicit path
+  python compare_reports.py --twbx report.twbx --pbix report.pbix --output my_result.json
+
+  # Verbose output
   python compare_reports.py --twbx report.twbx --pbix report.pbix --verbose
         """,
     )
@@ -197,41 +243,30 @@ Examples:
         metavar="PATH",
         help="Path to the Tableau Packaged Workbook (.twbx) file",
     )
-
     parser.add_argument(
         "--pbix",
         required=True,
         metavar="PATH",
         help="Path to the Power BI Desktop (.pbix) file",
     )
-
     parser.add_argument(
         "--output",
         default=None,
         metavar="PATH",
         help=(
             "Path to save the JSON result file. "
-            "Defaults to output_json/{twbx}_vs_{pbix}_{PASS|FAIL}_{timestamp}.json"
+            "If omitted, saves to results/result_pass_<timestamp>.json "
+            "or results/result_fail_<timestamp>.json automatically."
         ),
     )
-
     parser.add_argument(
         "--verbose",
         action="store_true",
-        default=config.VERBOSE,
         help="Enable verbose logging for detailed per-column information",
     )
 
     args = parser.parse_args()
-
-    exit_code = compare_reports(
-        args.twbx,
-        args.pbix,
-        args.output,
-        args.verbose,
-    )
-
-    sys.exit(exit_code)
+    sys.exit(compare_reports(args.twbx, args.pbix, args.output, args.verbose))
 
 
 if __name__ == "__main__":

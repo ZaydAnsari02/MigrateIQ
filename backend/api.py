@@ -51,11 +51,13 @@ async def validate_reports(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File save failed: {e}")
 
+    script_path = Path(__file__).parent / "compare_reports.py"
+
     # Run the comparison script
     proc = subprocess.run(
     [
         "python",
-        "compare_reports.py",
+        str(script_path),
         "--twbx", twbx_path,
         "--pbix", pbix_path,
         "--output", output_path,
