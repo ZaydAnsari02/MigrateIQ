@@ -25,7 +25,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+.next/
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -67,6 +67,7 @@ instance/
 
 #frontend
 node_modules/
+.next/
 dist/
 # Scrapy stuff:
 .scrapy
@@ -141,14 +142,11 @@ celerybeat.pid
 .env
 .envrc
 .venv
-.env.local
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
-frontend/node_modules/
-frontend/.next/
 
 # Spyder project settings
 .spyderproject

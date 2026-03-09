@@ -1,0 +1,185 @@
+/**
+ * src/services/validationService.ts
+ *
+ * All HTTP calls to the MigrateIQ FastAPI backend.
+ *
+ * Base URL is read from NEXT_PUBLIC_API_URL (set in .env.local).
+ * Falls back to http://localhost:8000 for local development.
+ */
+
+import axios, { AxiosError } from "axios";
+import type { UploadedFiles } from "@/types";
+
+// ─── Axios instance ───────────────────────────────────────────────────────────
+
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+const api = axios.create({
+  baseURL: BASE_URL,
+  timeout: 120_000,          // 2 min — parsing large files can be slow
+});
+
+// ─── Types returned by the FastAPI backend ────────────────────────────────────
+// These mirror the JSON structure produced by output/result_builder.py
+
+export interface BackendResult {
+  comparison_id:      string;
+  timestamp:          string;
+  inputs: {
+    twbx_file:        string;
+    pbix_file:        string;
+  };
+  overall_result:     "PASS" | "FAIL";
+  categories: {
+    data: {
+      result:         "PASS" | "FAIL";
+      tolerance_threshold_pct: number;
+      tables_compared: number;
+      details:        BackendCheckDetail[];
+    };
+    semantic_model: {
+      result:         "PASS" | "FAIL";
+      measures_compared: number;
+      details: {
+        measures_matched: any[];
+        measures_missing_in_pbix: any[];
+        measures_missing_in_twbx: any[];
+        expression_mismatches: any[];
+        data_type_mismatches: any[];
+        failure_reasons: string[];
+      };
+    };
+    relationships: {
+      result:         "PASS" | "FAIL";
+      relationships_compared: number;
+      details: {
+        relationships_matched: any[];
+        relationships_missing_in_pbix: any[];
+        relationships_missing_in_twbx: any[];
+        cardinality_mismatches: any[];
+        failure_reasons: string[];
+      };
+    };
+  };
+  summary: {
+    total_failures:    number;
+    failure_categories: any[];
+    notes:             string;
+  };
+}
+
+export interface BackendCheckDetail {
+  table_name:         string;
+  result:             "PASS" | "FAIL" | "WARNING";
+  row_count_twbx?:    number | null;
+  row_count_pbix?:    number | null;
+  row_count_diff_pct?: number | null;
+  columns_matched?:   any[];
+  columns_missing_in_pbix?: any[];
+  columns_missing_in_twbx?: any[];
+  column_type_mismatches?: any[];
+  failure_reasons:    string[];
+}
+
+export interface ResultListResponse {
+  run_ids: string[];
+  count:   number;
+}
+
+// ─── Error helper ─────────────────────────────────────────────────────────────
+
+function extractError(err: unknown): string {
+  if (err instanceof AxiosError) {
+    return err.response?.data?.detail ?? err.message;
+  }
+  return String(err);
+}
+
+// ─── Validation Service ───────────────────────────────────────────────────────
+
+export const validationService = {
+  /**
+   * POST /validate
+   *
+   * Sends the .twbx and .pbix files to the backend.
+   * The backend runs compare_reports.py and returns the full JSON result
+   * synchronously (the response arrives once the script finishes).
+   *
+   * @param files   The UploadedFiles object from the useUpload hook
+   * @param onProgress  Optional callback — receives 0–100 upload progress
+   */
+  async startValidation(
+    files: UploadedFiles,
+    onProgress?: (pct: number) => void,
+  ): Promise<BackendResult> {
+    if (!files.twb || !files.pbix) {
+      throw new Error("Both a Tableau workbook (.twbx) and a Power BI file (.pbix) are required.");
+    }
+
+    const form = new FormData();
+    form.append("twbx", files.twb);
+    form.append("pbix",  files.pbix);
+
+    // Note: screenshot uploads are not yet wired into compare_reports.py.
+    // Attach them so the backend can be extended without a frontend change.
+    if (files.tableauScreenshots) form.append("tableau_screenshots", files.tableauScreenshots);
+    if (files.pbiScreenshots)     form.append("pbi_screenshots",     files.pbiScreenshots);
+
+    try {
+      const { data } = await api.post<BackendResult>("/validate", form, {
+        headers: { "Content-Type": "multipart/form-data" },
+        onUploadProgress: (evt) => {
+          if (onProgress && evt.total) {
+            onProgress(Math.round((evt.loaded / evt.total) * 100));
+          }
+        },
+      });
+      return data;
+    } catch (err) {
+      throw new Error(`Validation failed: ${extractError(err)}`);
+    }
+  },
+
+  /**
+   * GET /results/{run_id}
+   *
+   * Fetches a previously-generated result by run ID.
+   * Useful for history or after a page reload.
+   */
+  async getResult(runId: string): Promise<BackendResult> {
+    try {
+      const { data } = await api.get<BackendResult>(`/results/${runId}`);
+      return data;
+    } catch (err) {
+      throw new Error(`Could not load result ${runId}: ${extractError(err)}`);
+    }
+  },
+
+  /**
+   * GET /results
+   *
+   * Returns a list of all stored run IDs.
+   */
+  async listResults(): Promise<ResultListResponse> {
+    try {
+      const { data } = await api.get<ResultListResponse>("/results");
+      return data;
+    } catch (err) {
+      throw new Error(`Could not list results: ${extractError(err)}`);
+    }
+  },
+
+  /**
+   * GET /health
+   *
+   * Ping the backend to confirm it is reachable.
+   */
+  async healthCheck(): Promise<boolean> {
+    try {
+      await api.get("/health");
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
