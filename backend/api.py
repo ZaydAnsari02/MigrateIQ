@@ -53,15 +53,16 @@ async def validate_reports(
 
     # Run the comparison script
     proc = subprocess.run(
-        [
-            r"c:\Users\lavanya.singh\OneDrive - iLink Systems Inc\Desktop\migrateIQ\.venv\Scripts\python.exe", "compare_reports.py",
-            "--twbx",   twbx_path,
-            "--pbix",   pbix_path,
-            "--output", output_path,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    [
+        "python",
+        "compare_reports.py",
+        "--twbx", twbx_path,
+        "--pbix", pbix_path,
+        "--output", output_path,
+    ],
+    capture_output=True,
+    text=True,
+)
 
     if proc.returncode not in (0, 1):  # 0 = PASS, 1 = FAIL are both valid
         raise HTTPException(
