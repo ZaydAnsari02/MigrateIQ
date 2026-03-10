@@ -33,6 +33,7 @@ class ComparisonResultBuilder:
         model_details: Dict[str, Any],
         relationships_result: str,
         relationships_details: Dict[str, Any],
+        tolerance_pct: float = 0.5,
     ) -> Dict[str, Any]:
         """
         Build the complete comparison result.
@@ -67,7 +68,7 @@ class ComparisonResultBuilder:
         # Build data section
         data_section = {
             "result": data_result,
-            "tolerance_threshold_pct": 0.5,
+            "tolerance_threshold_pct": tolerance_pct,
             "tables_compared": len(data_details),
             "details": data_details,
         }

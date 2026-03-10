@@ -54,10 +54,14 @@ export function RunsTable({ runs, onSelect }: RunsTableProps) {
                   <span className="text-xs text-zinc-600">{run.totalReports}</span>
                 </td>
                 <td className="px-5 py-3.5">
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="text-emerald-600 font-semibold">{run.passed} ✓</span>
-                    <span className="text-zinc-300">·</span>
-                    <span className="text-red-500 font-semibold">{run.failed} ✗</span>
+                  <div className="flex items-center text-xs">
+                    {run.status === "PASS" ? (
+                      <span className="text-emerald-600 font-semibold flex items-center gap-1">Pass ✓</span>
+                    ) : run.status === "FAIL" ? (
+                      <span className="text-red-500 font-semibold flex items-center gap-1">Fail ✗</span>
+                    ) : (
+                      <span className="text-zinc-400">—</span>
+                    )}
                   </div>
                 </td>
                 <td className="px-5 py-3.5">

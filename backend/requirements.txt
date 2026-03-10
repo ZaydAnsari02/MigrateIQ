@@ -14,3 +14,4 @@ openai
 Pillow
 numpy
 anthropic
+python-multipart

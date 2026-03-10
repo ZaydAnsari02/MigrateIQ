@@ -2,6 +2,7 @@
 import logging
 import re
 from typing import Dict, List, Any, Tuple
+from comparators.type_utils import get_type_group, are_types_compatible
 
 logger = logging.getLogger(__name__)
 
@@ -18,35 +19,7 @@ def _norm_name(name: str) -> str:
     return re.sub(r"[ _]+", "_", name.lower().strip())
 
 
-# ---------------------------------------------------------------------------
-# Type equivalence (reused from data_comparator logic)
-# ---------------------------------------------------------------------------
-_TYPE_GROUPS: Dict[str, str] = {
-    "string":   "text",   "str": "text",  "text": "text",
-    "wstr":     "text",   "object": "text",
-    "integer":  "integer","int": "integer","int64": "integer",
-    "int32":    "integer","int16": "integer","int8": "integer",
-    "long":     "integer",
-    "real":     "decimal","double": "decimal","float": "decimal",
-    "float64":  "decimal","float32": "decimal","decimal": "decimal",
-    "currency": "decimal",
-    "boolean":  "boolean","bool": "boolean",
-    "date":     "datetime","datetime": "datetime",
-    "datetime64[ns]": "datetime","timestamp": "datetime","time": "datetime",
-    "unknown":  "unknown",
-}
 
-
-def _type_group(t: str) -> str:
-    return _TYPE_GROUPS.get(t.lower().strip(), t.lower().strip())
-
-
-def _types_compatible(t1: str, t2: str) -> bool:
-    g1, g2 = _type_group(t1), _type_group(t2)
-    # 'unknown' on either side → treat as compatible (can't know)
-    if "unknown" in (g1, g2):
-        return True
-    return g1 == g2
 
 
 # ---------------------------------------------------------------------------
@@ -123,18 +96,18 @@ class ModelComparator:
                 # Type comparison (with equivalence map)
                 tw_type = tw.get("data_type", "unknown")
                 pb_type = pb.get("data_type", "unknown")
-                if not _types_compatible(tw_type, pb_type):
+                if not are_types_compatible(tw_type, pb_type):
                     details["data_type_mismatches"].append({
                         "measure":      tw["name"],
                         "twbx_type":    tw_type,
                         "pbix_type":    pb_type,
-                        "twbx_canonical": _type_group(tw_type),
-                        "pbix_canonical": _type_group(pb_type),
+                        "twbx_canonical": get_type_group(tw_type),
+                        "pbix_canonical": get_type_group(pb_type),
                     })
                     details["failure_reasons"].append(
                         f"Incompatible type for measure '{tw['name']}': "
-                        f"TWBX={tw_type} ({_type_group(tw_type)}) "
-                        f"PBIX={pb_type} ({_type_group(pb_type)})"
+                        f"TWBX={tw_type} ({get_type_group(tw_type)}) "
+                        f"PBIX={pb_type} ({get_type_group(pb_type)})"
                     )
                     result = "FAIL"
 
@@ -294,13 +267,13 @@ class ModelComparator:
                     pb_col = pb_col_map[norm_col]
                     tw_type = tw_col.get("data_type", "unknown")
                     pb_type = pb_col.get("data_type", "unknown")
-                    if not _types_compatible(tw_type, pb_type):
+                    if not are_types_compatible(tw_type, pb_type):
                         col_mismatch["type_mismatches"].append({
                             "column":           tw_col["name"],
                             "twbx_type":        tw_type,
                             "pbix_type":        pb_type,
-                            "twbx_canonical":   _type_group(tw_type),
-                            "pbix_canonical":   _type_group(pb_type),
+                            "twbx_canonical":   get_type_group(tw_type),
+                            "pbix_canonical":   get_type_group(pb_type),
                         })
                         result = "FAIL"
                         details["failure_reasons"].append(

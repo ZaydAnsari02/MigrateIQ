@@ -41,11 +41,12 @@ interface RowProps {
   pair: ReportPair;
   selected: boolean;
   onClick: () => void;
+  onMoreInfo?: () => void;
 }
 
-function ResultRow({ pair, selected, onClick }: RowProps) {
+function ResultRow({ pair, selected, onClick, onMoreInfo }: RowProps) {
   const tableauCaptured = !!pair.tableauScreenshot;
-  const pbiCaptured     = !!pair.powerBiScreenshot;
+  const pbiCaptured = !!pair.powerBiScreenshot;
 
   return (
     <tr
@@ -63,9 +64,9 @@ function ResultRow({ pair, selected, onClick }: RowProps) {
           <span
             className={cn(
               "w-1.5 h-1.5 rounded-full shrink-0",
-              pair.overallStatus === "PASS"    ? "bg-emerald-400" :
-              pair.overallStatus === "FAIL"    ? "bg-red-400" :
-              pair.overallStatus === "PENDING" ? "bg-amber-300" : "bg-zinc-300"
+              pair.overallStatus === "PASS" ? "bg-emerald-400" :
+                pair.overallStatus === "FAIL" ? "bg-red-400" :
+                  pair.overallStatus === "PENDING" ? "bg-amber-300" : "bg-zinc-300"
             )}
           />
           <span className="text-xs font-medium text-zinc-800">{pair.reportName}</span>
@@ -75,9 +76,6 @@ function ResultRow({ pair, selected, onClick }: RowProps) {
             </span>
           )}
         </div>
-        {pair.tableauWorkbook && (
-          <div className="text-[10px] text-zinc-400 font-mono mt-0.5 pl-4">{pair.tableauWorkbook}</div>
-        )}
       </td>
 
       {/* Tableau status */}
@@ -113,6 +111,19 @@ function ResultRow({ pair, selected, onClick }: RowProps) {
       <td className="px-3 py-3.5">
         <StatusBadge status={pair.overallStatus} />
       </td>
+
+      {/* Actions */}
+      <td className="px-5 py-3.5 text-right">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onMoreInfo?.();
+          }}
+          className="px-3 py-1.5 text-[10px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-md shadow-sm transition-all"
+        >
+          More Info
+        </button>
+      </td>
     </tr>
   );
 }
@@ -123,23 +134,24 @@ interface ResultsTableProps {
   pairs: ReportPair[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onMoreInfo?: (pair: ReportPair) => void;
 }
 
 const FILTER_LABELS: { label: string; value: ValidationStatus | "ALL" }[] = [
-  { label: "All",     value: "ALL" },
-  { label: "Pass",    value: "PASS" },
-  { label: "Fail",    value: "FAIL" },
+  { label: "All", value: "ALL" },
+  { label: "Pass", value: "PASS" },
+  { label: "Fail", value: "FAIL" },
   { label: "Pending", value: "PENDING" },
 ];
 
 const FILTER_COLORS: Record<string, string> = {
-  ALL:     "bg-zinc-800 text-white border-zinc-800",
-  PASS:    "bg-emerald-600 text-white border-emerald-600",
-  FAIL:    "bg-red-600 text-white border-red-600",
+  ALL: "bg-zinc-800 text-white border-zinc-800",
+  PASS: "bg-emerald-600 text-white border-emerald-600",
+  FAIL: "bg-red-600 text-white border-red-600",
   PENDING: "bg-amber-500 text-white border-amber-500",
 };
 
-export function ResultsTable({ pairs, selectedId, onSelect }: ResultsTableProps) {
+export function ResultsTable({ pairs, selectedId, onSelect, onMoreInfo }: ResultsTableProps) {
   const [filter, setFilter] = useState<ValidationStatus | "ALL">("ALL");
 
   const filtered = filter === "ALL"
@@ -147,9 +159,9 @@ export function ResultsTable({ pairs, selectedId, onSelect }: ResultsTableProps)
     : pairs.filter(p => p.overallStatus === filter);
 
   const counts: Record<string, number> = {
-    ALL:     pairs.length,
-    PASS:    pairs.filter(p => p.overallStatus === "PASS").length,
-    FAIL:    pairs.filter(p => p.overallStatus === "FAIL").length,
+    ALL: pairs.length,
+    PASS: pairs.filter(p => p.overallStatus === "PASS").length,
+    FAIL: pairs.filter(p => p.overallStatus === "FAIL").length,
     PENDING: pairs.filter(p => p.overallStatus === "PENDING").length,
   };
 
@@ -178,10 +190,13 @@ export function ResultsTable({ pairs, selectedId, onSelect }: ResultsTableProps)
         <table className="w-full">
           <thead>
             <tr className="bg-zinc-50 border-b border-zinc-100">
-              {["Report Name", "Tableau", "Power BI", "Layers", "Result"].map(col => (
+              {["Report Name", "Tableau", "Power BI", "Layers", "Result", ""].map((col, idx) => (
                 <th
-                  key={col}
-                  className="text-left text-[10px] font-semibold text-zinc-500 uppercase tracking-wider px-5 py-3 first:pl-5"
+                  key={idx}
+                  className={cn(
+                    "text-left text-[10px] font-semibold text-zinc-500 uppercase tracking-wider px-5 py-3 first:pl-5",
+                    idx === 5 && "text-right"
+                  )}
                 >
                   {col}
                 </th>
@@ -202,6 +217,7 @@ export function ResultsTable({ pairs, selectedId, onSelect }: ResultsTableProps)
                   pair={pair}
                   selected={selectedId === pair.id}
                   onClick={() => onSelect(pair.id)}
+                  onMoreInfo={() => onMoreInfo?.(pair)}
                 />
               ))
             )}

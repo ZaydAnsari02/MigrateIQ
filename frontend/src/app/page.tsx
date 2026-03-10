@@ -6,14 +6,13 @@ import { Header } from "@/components/layout/Header";
 import { DashboardOverview } from "@/components/dashboard/DashboardOverview";
 import { UploadSection } from "@/components/upload/UploadSection";
 import { ResultsTable } from "@/components/results/ResultsTable";
-import { DetailPanel } from "@/components/results/DetailPanel";
 import { RunsTable } from "@/components/dashboard/RunsTable";
 import { ComparisonExplorer } from "@/components/comparison/ComparisonExplorer";
 import { useSidebar, useUpload, useSelection } from "@/hooks";
 import { computeStats, cn } from "@/lib/utils";
-import { MOCK_RUNS } from "@/constants";
+import { MOCK_REPORT_PAIRS } from "@/constants";
 import { validationService, type BackendResult } from "@/services/validationService";
-import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, DiffType } from "@/types";
+import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, DiffType, ValidationRun } from "@/types";
 
 // ─── Map backend result → frontend ReportPair ─────────────────────────────────
 //
@@ -22,7 +21,22 @@ import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, Di
 // per report. Until the backend supports multi-report runs we map the single
 // result to one ReportPair row so every other component keeps working unchanged.
 
-function backendResultToReportPair(result: BackendResult): ReportPair {
+function backendResultToReportPair(result: any): ReportPair {
+  // Ensure results from /report-pairs also get their names cleaned
+  if (result.layer1Status && result.layer2Status && result.reportName) {
+    const cleanRepoName = (name: string) => {
+      if (!name) return "";
+      return name.split(" vs ").map(s => s.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "")).join(" vs ");
+    };
+
+    return {
+      ...result,
+      reportName: cleanRepoName(result.reportName),
+      tableauWorkbook: result.tableauWorkbook?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, ""),
+      powerbiReportName: result.powerbiReportName?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "")
+    } as ReportPair;
+  }
+
   const toStatus = (s: string): ValidationStatus =>
     (["PASS", "FAIL", "PENDING", "RUNNING"].includes(s) ? s : "PENDING") as ValidationStatus;
 
@@ -35,20 +49,22 @@ function backendResultToReportPair(result: BackendResult): ReportPair {
   const differences: Difference[] = [];
 
   // Data layer (L3) - details is an array
-  result.categories.data.details
-    .filter(d => d.result === "FAIL")
-    .forEach(d => {
-      differences.push({
-        type: "Data Regression",
-        detail: d.failure_reasons?.join(", ") || `Table '${d.table_name}' validation failed`,
-        severity: "high",
-        layer: "L3",
+  if (result.categories?.data?.details) {
+    result.categories.data.details
+      .filter((d: any) => d.result === "FAIL")
+      .forEach((d: any) => {
+        differences.push({
+          type: "Data Regression",
+          detail: d.failure_reasons?.join(", ") || `Table '${d.table_name}' validation failed`,
+          severity: "high",
+          layer: "L3",
+        });
       });
-    });
+  }
 
-  // Semantic model layer (L2) - details is an object with failure_reasons array
-  if (result.categories.semantic_model.details.failure_reasons.length > 0) {
-    result.categories.semantic_model.details.failure_reasons.forEach(reason => {
+  // Semantic model layer (L2)
+  if (result.categories?.semantic_model?.details?.failure_reasons?.length > 0) {
+    result.categories.semantic_model.details.failure_reasons.forEach((reason: string) => {
       differences.push({
         type: "DAX Mismatch",
         detail: reason,
@@ -58,9 +74,9 @@ function backendResultToReportPair(result: BackendResult): ReportPair {
     });
   }
 
-  // Relationships layer (L1) - details is an object with failure_reasons array
-  if (result.categories.relationships.details.failure_reasons.length > 0) {
-    result.categories.relationships.details.failure_reasons.forEach(reason => {
+  // Relationships layer (L1)
+  if (result.categories?.relationships?.details?.failure_reasons?.length > 0) {
+    result.categories.relationships.details.failure_reasons.forEach((reason: string) => {
       differences.push({
         type: "Missing Filter",
         detail: reason,
@@ -70,30 +86,61 @@ function backendResultToReportPair(result: BackendResult): ReportPair {
     });
   }
 
+  // Extract clean names from filenames (strip UUID prefix and extension)
+  const cleanName = (filename: string) => {
+    if (!filename) return "Unknown Report";
+    return filename.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "");
+  };
+
+  const twName = cleanName(result.inputs?.twbx_file || "");
+  const pbName = cleanName(result.inputs?.pbix_file || "");
+
+  const finalName = result.reportName
+    ? result.reportName.split(" vs ").map(cleanName).join(" vs ")
+    : `${twName} vs ${pbName}`;
+
   return {
-    id:               result.comparison_id,
-    projectId:        "proj-001",
-    runId:            result.comparison_id,
-    reportName:       "Validation Run",
-    overallStatus:    toStatus(result.overall_result),
-    layer1Status:     toLayer(result.categories.relationships.result),
-    layer2Status:     toLayer(result.categories.semantic_model.result),
-    layer3Status:     toLayer(result.categories.data.result),
+    id: result.comparison_id || result.id,
+    projectId: "proj-001",
+    runId: result.comparison_id || result.id,
+    reportName: finalName,
+    overallStatus: toStatus(result.overall_result || result.overallStatus),
+    layer1Status: toLayer(result.categories?.relationships?.result || result.layer1Status || "pending"),
+    layer2Status: toLayer(result.categories?.semantic_model?.result || result.layer2Status || "pending"),
+    layer3Status: toLayer(result.categories?.data?.result || result.layer3Status || "pending"),
     differences,
-    createdAt:        result.timestamp,
-    updatedAt:        result.timestamp,
+    createdAt: result.timestamp || result.createdAt,
+    updatedAt: result.timestamp || result.updatedAt || result.createdAt,
+  };
+}
+
+function backendRunToValidationRun(run: any): ValidationRun {
+  const toStatus = (s: string): ValidationStatus =>
+    (["PASS", "FAIL", "PENDING", "RUNNING", "ERROR"].includes(s) ? s : "PENDING") as ValidationStatus;
+
+  return {
+    id: String(run.id),
+    projectId: String(run.project_id),
+    triggeredBy: run.triggered_by,
+    status: toStatus(run.status),
+    totalReports: run.total_reports,
+    passed: run.passed,
+    failed: run.failed,
+    errored: run.errored,
+    startedAt: run.started_at,
+    completedAt: run.completed_at,
   };
 }
 
 // ─── Page Title Map ───────────────────────────────────────────────────────────
 
 const PAGE_TITLES: Record<NavItem, { title: string; sub: string }> = {
-  dashboard: { title: "Validation Dashboard",   sub: "AI Telekom TD → Fabric · Overview" },
-  upload:    { title: "Upload Reports",          sub: "Upload source files to trigger a new validation run" },
-  runs:      { title: "Validation Runs",         sub: "History of all pipeline executions" },
-  results:   { title: "Validation Results",      sub: "Per-report validation outcomes across all three layers" },
-  explorer:  { title: "Comparison Explorer",     sub: "Side-by-side visual and metric comparison" },
-  settings:  { title: "Settings",                sub: "Project configuration and integration settings" },
+  dashboard: { title: "Validation Dashboard", sub: "AI Telekom TD → Fabric · Overview" },
+  upload: { title: "Upload Reports", sub: "Upload source files to trigger a new validation run" },
+  runs: { title: "Validation Runs", sub: "History of all pipeline executions" },
+  results: { title: "Validation Results", sub: "Per-report validation outcomes across all three layers" },
+  explorer: { title: "Comparison Explorer", sub: "Side-by-side visual and metric comparison" },
+  settings: { title: "Settings", sub: "Project configuration and integration settings" },
 };
 
 // ─── Settings placeholder ─────────────────────────────────────────────────────
@@ -132,27 +179,45 @@ function BackendBanner({ online }: { online: boolean | null }) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
-  const [activeNav,     setActiveNav]     = useState<NavItem>("dashboard");
-  const [startLoading,  setStartLoading]  = useState(false);
-  const [uploadPct,     setUploadPct]     = useState(0);
-  const [apiError,      setApiError]      = useState<string | null>(null);
+  const [activeNav, setActiveNav] = useState<NavItem>("dashboard");
+  const [startLoading, setStartLoading] = useState(false);
+  const [uploadPct, setUploadPct] = useState(0);
+  const [apiError, setApiError] = useState<string | null>(null);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
+  const [explorerSelections, setExplorerSelections] = useState<{ left?: string, right?: string }>({});
 
   // All real results that have come back from the backend this session
-  const [livePairs, setLivePairs] = useState<ReportPair[]>([] as ReportPair[]);
+  const [livePairs, setLivePairs] = useState<ReportPair[]>([]);
+  const [liveRuns, setLiveRuns] = useState<ValidationRun[]>([]);
 
-  const sidebar   = useSidebar(false);
-  const upload    = useUpload();
+  const sidebar = useSidebar(false);
+  const upload = useUpload();
   const selection = useSelection<string>();
 
-  const stats        = computeStats(livePairs);
-  const selectedPair = livePairs.find(p => p.id === selection.selected) ?? null;
-  const page         = PAGE_TITLES[activeNav];
+  const stats = computeStats(livePairs);
+  const page = PAGE_TITLES[activeNav];
 
-  // ── Health check on mount ────────────────────────────────────────────────
+  // ── Load all data on mount ──────────────────────────────────────────────
 
   useEffect(() => {
-    validationService.healthCheck().then(setBackendOnline);
+    const init = async () => {
+      try {
+        const isOnline = await validationService.healthCheck();
+        setBackendOnline(isOnline);
+        if (!isOnline) return;
+
+        // 1. Load Runs
+        const runsData = await validationService.listRuns();
+        setLiveRuns(runsData.map(backendRunToValidationRun));
+
+        // 2. Load all Report Pairs
+        const pairsData = await validationService.listReportPairs();
+        setLivePairs(pairsData.map(backendResultToReportPair));
+      } catch (err) {
+        console.error("Failed to load initial data:", err);
+      }
+    };
+    init();
   }, []);
 
   // ── Start Validation ─────────────────────────────────────────────────────
@@ -173,9 +238,18 @@ export default function DashboardPage() {
       );
       const pair = backendResultToReportPair(result);
       setLivePairs(prev => [pair, ...prev]);
+
+      // Refresh lists
+      const [runsData, pairsData] = await Promise.all([
+        validationService.listRuns(),
+        validationService.listReportPairs()
+      ]);
+      setLiveRuns(runsData.map(backendRunToValidationRun));
+      setLivePairs(pairsData.map(backendResultToReportPair));
+
       upload.reset();
       setActiveNav("results");
-      selection.select(pair.id); // auto-open the detail panel
+      selection.select(pair.id);
     } catch (err: unknown) {
       setApiError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -189,7 +263,7 @@ export default function DashboardPage() {
   const handleLoadRun = useCallback(async (runId: string) => {
     try {
       const result = await validationService.getResult(runId);
-      const pair   = backendResultToReportPair(result);
+      const pair = backendResultToReportPair(result);
       setLivePairs(prev => {
         const exists = prev.some(p => p.id === pair.id);
         return exists ? prev : [pair, ...prev];
@@ -200,6 +274,14 @@ export default function DashboardPage() {
       setApiError(err instanceof Error ? err.message : String(err));
     }
   }, [selection]);
+
+  // ── Navigate to Explorer with specific reports ───────────────────────────
+
+  const handleMoreInfo = useCallback((pair: ReportPair) => {
+    // We set this as the 'left' side of comparison, and potentially the same or first pair as 'right'
+    setExplorerSelections({ left: pair.id, right: pair.id });
+    setActiveNav("explorer");
+  }, []);
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#F4F5F7]">
@@ -261,7 +343,7 @@ export default function DashboardPage() {
 
             {/* ── Dashboard ──────────────────────────────────────────────── */}
             {activeNav === "dashboard" && (
-              <DashboardOverview stats={stats} runs={MOCK_RUNS} pairs={livePairs} />
+              <DashboardOverview stats={stats} runs={liveRuns} pairs={livePairs} />
             )}
 
             {/* ── Upload ─────────────────────────────────────────────────── */}
@@ -307,7 +389,7 @@ export default function DashboardPage() {
 
             {/* ── Runs ───────────────────────────────────────────────────── */}
             {activeNav === "runs" && (
-              <RunsTable runs={MOCK_RUNS} onSelect={run => handleLoadRun(run.id)} />
+              <RunsTable runs={liveRuns} onSelect={run => handleLoadRun(run.id)} />
             )}
 
             {/* ── Results ────────────────────────────────────────────────── */}
@@ -325,26 +407,26 @@ export default function DashboardPage() {
                   </button>
                 </div>
               ) : (
-                <div className={cn("grid gap-5", selectedPair ? "grid-cols-5" : "grid-cols-1")}>
-                  <div className={selectedPair ? "col-span-3" : "col-span-1"}>
+                <div className="grid grid-cols-1 gap-5">
+                  <div className="col-span-1">
                     <ResultsTable
                       pairs={livePairs}
                       selectedId={selection.selected}
                       onSelect={selection.toggle}
+                      onMoreInfo={handleMoreInfo}
                     />
                   </div>
-                  {selectedPair && (
-                    <div className="col-span-2">
-                      <DetailPanel pair={selectedPair} onClose={selection.deselect} />
-                    </div>
-                  )}
                 </div>
               )
             )}
 
             {/* ── Explorer ───────────────────────────────────────────────── */}
             {activeNav === "explorer" && (
-              <ComparisonExplorer pairs={livePairs} />
+              <ComparisonExplorer
+                pairs={[...livePairs, ...MOCK_REPORT_PAIRS]}
+                initialLeftId={explorerSelections.left}
+                initialRightId={explorerSelections.right}
+              />
             )}
 
             {/* ── Settings ───────────────────────────────────────────────── */}

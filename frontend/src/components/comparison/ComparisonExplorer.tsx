@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { StatusBadge, LayerDot } from "@/components/ui/Badge";
@@ -8,14 +8,46 @@ import type { ReportPair } from "@/types";
 
 interface ComparisonExplorerProps {
   pairs: ReportPair[];
+  initialLeftId?: string;
+  initialRightId?: string;
 }
 
-export function ComparisonExplorer({ pairs }: ComparisonExplorerProps) {
-  const [leftId, setLeftId]   = useState<string>(pairs[0]?.id ?? "");
-  const [rightId, setRightId] = useState<string>(pairs[1]?.id ?? "");
+export function ComparisonExplorer({ pairs, initialLeftId, initialRightId }: ComparisonExplorerProps) {
+  const [leftId, setLeftId] = useState<string>(initialLeftId ?? pairs[0]?.id ?? "");
+  const [rightId, setRightId] = useState<string>(initialRightId ?? pairs[1]?.id ?? pairs[0]?.id ?? "");
 
-  const left  = pairs.find(p => p.id === leftId);
+  // Sync state when props change
+  useEffect(() => {
+    if (initialLeftId) setLeftId(initialLeftId);
+    if (initialRightId) setRightId(initialRightId);
+  }, [initialLeftId, initialRightId]);
+
+  // Sync state when pairs change (e.g. after an upload)
+  useEffect(() => {
+    if (pairs.length > 0) {
+      if (!leftId || !pairs.find(p => p.id === leftId)) {
+        setLeftId(pairs[0].id);
+      }
+      if (!rightId || !pairs.find(p => p.id === rightId)) {
+        setRightId(pairs[1]?.id ?? pairs[0].id);
+      }
+    }
+  }, [pairs, leftId, rightId]);
+
+  const left = pairs.find(p => p.id === leftId);
   const right = pairs.find(p => p.id === rightId);
+
+  if (pairs.length === 0) {
+    return (
+      <Card>
+        <div className="p-12 text-center">
+          <div className="text-4xl mb-3">🔍</div>
+          <h3 className="text-sm font-semibold text-zinc-700 mb-1">No reports to compare</h3>
+          <p className="text-xs text-zinc-400">Run a validation or upload reports to see them here.</p>
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -51,14 +83,19 @@ export function ComparisonExplorer({ pairs }: ComparisonExplorerProps) {
       </Card>
 
       {/* Side-by-side */}
-      {left && right && (
-        <div className="grid grid-cols-2 gap-4">
-          {[left, right].map((pair, idx) => (
-            <Card key={pair.id}>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {[
+          { key: "left", pair: left },
+          { key: "right", pair: right },
+        ].map(({ key, pair }) => {
+          if (!pair) return <div key={key} className="bg-zinc-100 rounded-xl border-2 border-dashed border-zinc-200 h-96 flex items-center justify-center text-zinc-400 text-xs">Select a report</div>;
+
+          return (
+            <Card key={`${key}-${pair.id}`}>
               <CardHeader>
                 <div className="flex-1 min-w-0">
                   <div className="text-xs font-semibold text-zinc-900 truncate">{pair.reportName}</div>
-                  <div className="text-[10px] text-zinc-400 font-mono mt-0.5">{pair.id}</div>
+                  <div className="text-[10px] text-zinc-400 font-mono mt-0.5 truncate">{pair.id}</div>
                 </div>
                 <StatusBadge status={pair.overallStatus} />
               </CardHeader>
@@ -73,8 +110,12 @@ export function ComparisonExplorer({ pairs }: ComparisonExplorerProps) {
                     ].map(side => (
                       <div key={side.label}>
                         <div className="text-[9px] text-zinc-400 mb-1">{side.label}</div>
-                        <div className="bg-zinc-100 rounded-lg h-20 flex items-center justify-center border border-zinc-200 text-2xl">
-                          {side.icon}
+                        <div className="bg-zinc-100 rounded-lg h-28 flex items-center justify-center border border-zinc-200 overflow-hidden">
+                          {side.path ? (
+                            <img src={side.path} alt={side.label} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="text-2xl">{side.icon}</div>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -86,9 +127,9 @@ export function ComparisonExplorer({ pairs }: ComparisonExplorerProps) {
                   <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">Validation Layers</div>
                   <div className="space-y-1.5">
                     {[
-                      { label: "L1 Visual",   status: pair.layer1Status },
+                      { label: "L1 Visual", status: pair.layer1Status },
                       { label: "L2 Semantic", status: pair.layer2Status },
-                      { label: "L3 Data",     status: pair.layer3Status },
+                      { label: "L3 Data", status: pair.layer3Status },
                     ].map(l => (
                       <div key={l.label} className="flex items-center justify-between py-1 border-b border-zinc-50 last:border-0">
                         <span className="text-xs text-zinc-600">{l.label}</span>
@@ -107,20 +148,23 @@ export function ComparisonExplorer({ pairs }: ComparisonExplorerProps) {
                     <div className="text-xs text-zinc-400 italic">None detected</div>
                   ) : (
                     <div className="space-y-1.5">
-                      {pair.differences.map((d, i) => (
+                      {pair.differences.slice(0, 3).map((d, i) => (
                         <div key={i} className="bg-red-50 border border-red-200 rounded-lg px-3 py-2">
                           <div className="text-[10px] font-bold text-red-700">{d.type}</div>
                           <div className="text-[10px] text-zinc-500 font-mono mt-0.5 truncate">{d.detail}</div>
                         </div>
                       ))}
+                      {pair.differences.length > 3 && (
+                        <div className="text-[9px] text-zinc-400 text-center">+ {pair.differences.length - 3} more issues</div>
+                      )}
                     </div>
                   )}
                 </div>
               </div>
             </Card>
-          ))}
-        </div>
-      )}
+          );
+        })}
+      </div>
     </div>
   );
 }

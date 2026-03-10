@@ -23,22 +23,22 @@ const api = axios.create({
 // These mirror the JSON structure produced by output/result_builder.py
 
 export interface BackendResult {
-  comparison_id:      string;
-  timestamp:          string;
+  comparison_id: string;
+  timestamp: string;
   inputs: {
-    twbx_file:        string;
-    pbix_file:        string;
+    twbx_file: string;
+    pbix_file: string;
   };
-  overall_result:     "PASS" | "FAIL";
+  overall_result: "PASS" | "FAIL";
   categories: {
     data: {
-      result:         "PASS" | "FAIL";
+      result: "PASS" | "FAIL";
       tolerance_threshold_pct: number;
       tables_compared: number;
-      details:        BackendCheckDetail[];
+      details: BackendCheckDetail[];
     };
     semantic_model: {
-      result:         "PASS" | "FAIL";
+      result: "PASS" | "FAIL";
       measures_compared: number;
       details: {
         measures_matched: any[];
@@ -50,7 +50,7 @@ export interface BackendResult {
       };
     };
     relationships: {
-      result:         "PASS" | "FAIL";
+      result: "PASS" | "FAIL";
       relationships_compared: number;
       details: {
         relationships_matched: any[];
@@ -62,28 +62,28 @@ export interface BackendResult {
     };
   };
   summary: {
-    total_failures:    number;
+    total_failures: number;
     failure_categories: any[];
-    notes:             string;
+    notes: string;
   };
 }
 
 export interface BackendCheckDetail {
-  table_name:         string;
-  result:             "PASS" | "FAIL" | "WARNING";
-  row_count_twbx?:    number | null;
-  row_count_pbix?:    number | null;
+  table_name: string;
+  result: "PASS" | "FAIL" | "WARNING";
+  row_count_twbx?: number | null;
+  row_count_pbix?: number | null;
   row_count_diff_pct?: number | null;
-  columns_matched?:   any[];
+  columns_matched?: any[];
   columns_missing_in_pbix?: any[];
   columns_missing_in_twbx?: any[];
   column_type_mismatches?: any[];
-  failure_reasons:    string[];
+  failure_reasons: string[];
 }
 
 export interface ResultListResponse {
   run_ids: string[];
-  count:   number;
+  count: number;
 }
 
 // ─── Error helper ─────────────────────────────────────────────────────────────
@@ -118,12 +118,12 @@ export const validationService = {
 
     const form = new FormData();
     form.append("twbx", files.twb);
-    form.append("pbix",  files.pbix);
+    form.append("pbix", files.pbix);
 
     // Note: screenshot uploads are not yet wired into compare_reports.py.
     // Attach them so the backend can be extended without a frontend change.
     if (files.tableauScreenshots) form.append("tableau_screenshots", files.tableauScreenshots);
-    if (files.pbiScreenshots)     form.append("pbi_screenshots",     files.pbiScreenshots);
+    if (files.pbiScreenshots) form.append("pbi_screenshots", files.pbiScreenshots);
 
     try {
       const { data } = await api.post<BackendResult>("/validate", form, {
@@ -166,6 +166,27 @@ export const validationService = {
       return data;
     } catch (err) {
       throw new Error(`Could not list results: ${extractError(err)}`);
+    }
+  },
+
+  /**
+   * GET /runs
+   */
+  async listRuns(): Promise<any[]> {
+    try {
+      const { data } = await api.get<any[]>("/runs");
+      return data;
+    } catch (err) {
+      throw new Error(`Could not list runs: ${extractError(err)}`);
+    }
+  },
+
+  async listReportPairs(): Promise<any[]> {
+    try {
+      const { data } = await api.get<any[]>("/report-pairs");
+      return data;
+    } catch (err) {
+      throw new Error(`Could not list report pairs: ${extractError(err)}`);
     }
   },
 

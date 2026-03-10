@@ -183,6 +183,7 @@ def compare_reports(
             model_details,
             relationships_result,
             relationships_details,
+            tolerance_pct=data_comparator.tolerance_pct,
         )
 
         # ── Resolve output path and save ─────────────────────────────────

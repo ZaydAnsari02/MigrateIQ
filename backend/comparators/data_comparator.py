@@ -4,64 +4,12 @@ import re
 from difflib import SequenceMatcher
 from typing import Dict, List, Any, Tuple, Optional
 import pandas as pd
+from comparators.type_utils import get_type_group, are_types_compatible
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Type equivalence map
-#
-# Tableau types  ->  compatible Power BI types (and vice-versa).
-# Keys are lowercased.  If two types share the same canonical group they are
-# considered equivalent and the comparison PASSes for that column.
-# ---------------------------------------------------------------------------
-_TYPE_GROUPS: Dict[str, str] = {
-    # Text / string
-    "string":   "text",
-    "str":      "text",
-    "text":     "text",
-    "wstr":     "text",
-    "object":   "text",       # pandas default for string columns
-    # Integer
-    "integer":  "integer",
-    "int":      "integer",
-    "int64":    "integer",
-    "int32":    "integer",
-    "int16":    "integer",
-    "int8":     "integer",
-    "long":     "integer",
-    # Decimal / float
-    "real":     "decimal",
-    "double":   "decimal",
-    "float":    "decimal",
-    "float64":  "decimal",
-    "float32":  "decimal",
-    "decimal":  "decimal",
-    "currency": "decimal",
-    # Boolean
-    "boolean":  "boolean",
-    "bool":     "boolean",
-    # Date / time
-    "date":     "datetime",
-    "datetime": "datetime",
-    "datetime64[ns]": "datetime",
-    "timestamp": "datetime",
-    "time":     "datetime",
-}
 
-
-def _type_group(type_str: str) -> str:
-    """Return the canonical type group for a given type string."""
-    return _TYPE_GROUPS.get(type_str.lower().strip(), type_str.lower().strip())
-
-
-def _types_compatible(t1: str, t2: str) -> bool:
-    """Return True if two type strings map to the same canonical group.
-    'unknown' on either side is treated as compatible — we cannot determine otherwise."""
-    g1, g2 = _type_group(t1), _type_group(t2)
-    if "unknown" in (g1, g2):
-        return True
-    return g1 == g2
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +264,15 @@ class DataComparator:
         result["row_count_twbx"] = twbx_rows
         result["row_count_pbix"] = pbix_rows
 
-        if twbx_rows > 0:
+        if twbx_rows == 0 and pbix_rows == 0:
+            result["row_count_diff_pct"] = 0.0
+        elif twbx_rows == 0:
+            result["row_count_diff_pct"] = 100.0
+            result["result"] = "FAIL"
+            result["failure_reasons"].append(
+                f"Row count mismatch: TWBX has 0 rows, but PBIX has {pbix_rows}"
+            )
+        else:
             diff_pct = abs(twbx_rows - pbix_rows) / twbx_rows * 100
             result["row_count_diff_pct"] = round(diff_pct, 2)
             if diff_pct >= self.tolerance_pct:
@@ -325,8 +281,6 @@ class DataComparator:
                     f"Row count difference {diff_pct:.2f}% exceeds "
                     f"tolerance {self.tolerance_pct}%"
                 )
-        else:
-            result["row_count_diff_pct"] = 0.0
 
         # ── Check 2: column count ───────────────────────────────────────
         twbx_col_count = len(twbx_df.columns)
@@ -392,20 +346,20 @@ class DataComparator:
             twbx_dtype = str(twbx_df[twbx_orig].dtype)
             pbix_dtype = str(pbix_df[pbix_orig].dtype)
 
-            if not _types_compatible(twbx_dtype, pbix_dtype):
+            if not are_types_compatible(twbx_dtype, pbix_dtype):
                 mismatch = {
                     "column": twbx_orig,
                     "twbx_type": twbx_dtype,
                     "pbix_type": pbix_dtype,
-                    "twbx_canonical": _type_group(twbx_dtype),
-                    "pbix_canonical": _type_group(pbix_dtype),
+                    "twbx_canonical": get_type_group(twbx_dtype),
+                    "pbix_canonical": get_type_group(pbix_dtype),
                 }
                 result["column_type_mismatches"].append(mismatch)
                 result["result"] = "FAIL"
                 result["failure_reasons"].append(
                     f"Incompatible type for column '{twbx_orig}': "
-                    f"TWBX={twbx_dtype} ({_type_group(twbx_dtype)}) "
-                    f"PBIX={pbix_dtype} ({_type_group(pbix_dtype)})"
+                    f"TWBX={twbx_dtype} ({get_type_group(twbx_dtype)}) "
+                    f"PBIX={pbix_dtype} ({get_type_group(pbix_dtype)})"
                 )
                 if verbose:
                     logger.warning(

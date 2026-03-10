@@ -1,758 +1,411 @@
 """
-Tables
-------
-migration_project    One record per client migration engagement
-validation_run       One batch execution (manual or CI/CD triggered)
-report_pair          One Tableau report matched to its Power BI counterpart
-visual_result        Layer 1 — pixel diff score + GPT-4o analysis
-semantic_result      Layer 2 — calc field audit summary per report
-calc_field           One Tableau calculated field vs its DAX equivalent
-data_result          Layer 3 — KPI / aggregation comparison
-kpi_comparison       One KPI value diff (child of data_result)
-
+MigrateIQ — SQLAlchemy ORM Models (SQLite)
+Schema: 8 tables, 57 columns, 8 relations
 """
 
-from __future__ import annotations
-
-import logging
-import sqlite3
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 from typing import Optional
-from backend.config import DB_URL
 
-logger = logging.getLogger(__name__)
-
-
-# ── Status / Risk constants ────────────────────────────────────────────────────
-
-class Status:
-    PENDING = "pending"
-    RUNNING = "running"
-    PASS    = "pass"
-    FAIL    = "fail"
-    REVIEW  = "review"
-    ERROR   = "error"
+from sqlalchemy import (
+    Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
-class Risk:
-    LOW    = "low"
-    MEDIUM = "medium"
-    HIGH   = "high"
+# ---------------------------------------------------------------------------
+# Base
+# ---------------------------------------------------------------------------
+
+class Base(DeclarativeBase):
+    pass
 
 
-# ── Non-column relationship slots — excluded from INSERT ───────────────────────
-# Add any future relationship-only slots here to keep _insert() robust.
-_NON_COLUMN_SLOTS: frozenset[str] = frozenset({"visual_result"})
+# ---------------------------------------------------------------------------
+# 1. migration_project  (ROOT)
+# ---------------------------------------------------------------------------
+
+class MigrationProject(Base):
+    __tablename__ = "migration_project"
+
+    id: Mapped[int]                           = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str]                         = mapped_column(String, nullable=False)
+    client_name: Mapped[Optional[str]]        = mapped_column(String,  nullable=True)
+    description: Mapped[Optional[str]]        = mapped_column(Text,    nullable=True)
+    tableau_server_url: Mapped[Optional[str]] = mapped_column(String,  nullable=True)
+    tableau_site: Mapped[Optional[str]]       = mapped_column(String,  nullable=True)
+    powerbi_workspace_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime]              = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime]              = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    runs:  Mapped[list["ValidationRun"]]  = relationship("ValidationRun",  back_populates="project", cascade="all, delete-orphan")
+    pairs: Mapped[list["ReportPair"]]     = relationship("ReportPair",     back_populates="project", cascade="all, delete-orphan")
+
+    def __repr__(self) -> str:
+        return f"<MigrationProject id={self.id} name={self.name!r}>"
 
 
-# ── DDL ───────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# 2. validation_run  (BATCH)
+# ---------------------------------------------------------------------------
 
-_DDL = """
-PRAGMA foreign_keys = ON;
+class ValidationRun(Base):
+    __tablename__ = "validation_run"
 
-CREATE TABLE IF NOT EXISTS migration_project (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    name                 TEXT NOT NULL,
-    client_name          TEXT,
-    description          TEXT,
-    tableau_server_url   TEXT,
-    tableau_site         TEXT,
-    powerbi_workspace_id TEXT,
-    created_at           TEXT DEFAULT (datetime('now')),
-    updated_at           TEXT DEFAULT (datetime('now'))
-);
+    id: Mapped[int]                          = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int]                  = mapped_column(Integer, ForeignKey("migration_project.id"), nullable=False)
+    triggered_by: Mapped[str]               = mapped_column(String,  nullable=False)
+    status: Mapped[str]                      = mapped_column(String,  nullable=False)
+    total_reports: Mapped[int]               = mapped_column(Integer, nullable=False, default=0)
+    passed: Mapped[int]                      = mapped_column(Integer, nullable=False, default=0)
+    failed: Mapped[int]                      = mapped_column(Integer, nullable=False, default=0)
+    errored: Mapped[int]                     = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime]             = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
-CREATE TABLE IF NOT EXISTS validation_run (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id    INTEGER NOT NULL REFERENCES migration_project(id),
-    triggered_by  TEXT DEFAULT 'manual',
-    status        TEXT DEFAULT 'pending',
-    total_reports INTEGER DEFAULT 0,
-    passed        INTEGER DEFAULT 0,
-    failed        INTEGER DEFAULT 0,
-    needs_review  INTEGER DEFAULT 0,
-    errored       INTEGER DEFAULT 0,
-    started_at    TEXT DEFAULT (datetime('now')),
-    completed_at  TEXT
-);
+    # Relationships
+    project: Mapped["MigrationProject"]  = relationship("MigrationProject", back_populates="runs")
+    pairs:   Mapped[list["ReportPair"]]  = relationship("ReportPair", back_populates="run")
 
-CREATE TABLE IF NOT EXISTS report_pair (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id          INTEGER NOT NULL REFERENCES migration_project(id),
-    run_id              INTEGER REFERENCES validation_run(id),
-    report_name         TEXT NOT NULL,
-    tableau_workbook    TEXT,
-    tableau_view_name   TEXT,
-    tableau_view_id     TEXT,
-    powerbi_report_name TEXT,
-    powerbi_page_name   TEXT,
-    powerbi_report_id   TEXT,
-    tableau_screenshot  TEXT,
-    powerbi_screenshot  TEXT,
-    overall_status      TEXT DEFAULT 'pending',
-    overall_risk        TEXT,
-    created_at          TEXT DEFAULT (datetime('now')),
-    updated_at          TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS visual_result (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    report_pair_id       INTEGER NOT NULL REFERENCES report_pair(id),
-    pixel_similarity_pct REAL,
-    pixel_diff_count     INTEGER,
-    total_pixels         INTEGER,
-    hash_distance        INTEGER,
-    diff_image_path      TEXT,
-    compared_width       INTEGER,
-    compared_height      INTEGER,
-    gpt4o_called         INTEGER DEFAULT 0,
-    chart_type_match     INTEGER,
-    color_scheme_match   INTEGER,
-    layout_match         INTEGER,
-    axis_labels_match    INTEGER,
-    legend_match         INTEGER,
-    title_match          INTEGER,
-    data_labels_match    INTEGER,
-    ai_summary           TEXT,
-    ai_key_differences   TEXT,
-    ai_recommendation    TEXT,
-    ai_raw_response      TEXT,
-    status               TEXT DEFAULT 'pending',
-    pass_threshold_pct   REAL DEFAULT 95.0,
-    gpt4o_risk_level     TEXT,
-    created_at           TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS semantic_result (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    report_pair_id       INTEGER NOT NULL REFERENCES report_pair(id),
-    total_fields         INTEGER DEFAULT 0,
-    matched_fields       INTEGER DEFAULT 0,
-    flagged_fields       INTEGER DEFAULT 0,
-    manual_review_fields INTEGER DEFAULT 0,
-    status               TEXT DEFAULT 'pending',
-    created_at           TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS calc_field (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    semantic_result_id   INTEGER NOT NULL REFERENCES semantic_result(id),
-    field_name           TEXT NOT NULL,
-    tableau_formula      TEXT,
-    dax_from_pbix        TEXT,
-    claude_dax_suggested TEXT,
-    is_equivalent        INTEGER,
-    risk_level           TEXT,
-    differences          TEXT,
-    edge_cases           TEXT,
-    ai_explanation       TEXT,
-    status               TEXT DEFAULT 'pending',
-    created_at           TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS data_result (
-    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    report_pair_id     INTEGER NOT NULL REFERENCES report_pair(id),
-    tableau_row_count  INTEGER,
-    powerbi_row_count  INTEGER,
-    row_count_match    INTEGER,
-    total_kpis_checked INTEGER DEFAULT 0,
-    kpis_matched       INTEGER DEFAULT 0,
-    kpis_mismatched    INTEGER DEFAULT 0,
-    status             TEXT DEFAULT 'pending',
-    created_at         TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS kpi_comparison (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    data_result_id   INTEGER NOT NULL REFERENCES data_result(id),
-    metric_name      TEXT NOT NULL,
-    aggregation_type TEXT,
-    tableau_value    REAL,
-    powerbi_value    REAL,
-    absolute_diff    REAL,
-    percentage_diff  REAL,
-    is_match         INTEGER,
-    tolerance_pct    REAL DEFAULT 0.01,
-    created_at       TEXT DEFAULT (datetime('now'))
-);
-"""
+    def __repr__(self) -> str:
+        return f"<ValidationRun id={self.id} status={self.status!r}>"
 
 
-# ── Lightweight model classes ──────────────────────────────────────────────────
-# Field names mirror the database column names exactly so _insert() can build
-# INSERT statements generically from __slots__.
+# ---------------------------------------------------------------------------
+# 3. report_pair  (CENTRAL)
+# ---------------------------------------------------------------------------
 
-def _now() -> str:
-    """UTC timestamp as ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
+class ReportPair(Base):
+    __tablename__ = "report_pair"
 
+    id: Mapped[int]                              = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int]                      = mapped_column(Integer, ForeignKey("migration_project.id"), nullable=False)
+    run_id: Mapped[Optional[int]]                = mapped_column(Integer, ForeignKey("validation_run.id"),    nullable=True)
+    report_name: Mapped[str]                     = mapped_column(String, nullable=False)
 
-class MigrationProject:
-    __slots__ = [
-        "id", "name", "client_name", "description",
-        "tableau_server_url", "tableau_site", "powerbi_workspace_id",
-        "created_at", "updated_at",
-    ]
+    # Tableau
+    tableau_workbook: Mapped[Optional[str]]      = mapped_column(String, nullable=True)
+    tableau_view_name: Mapped[Optional[str]]     = mapped_column(String, nullable=True)
+    tableau_screenshot: Mapped[Optional[str]]    = mapped_column(String, nullable=True)
 
-    def __init__(
-        self,
-        name: str,
-        client_name: Optional[str]              = None,
-        description: Optional[str]              = None,
-        tableau_server_url: Optional[str]       = None,
-        tableau_site: Optional[str]             = None,
-        powerbi_workspace_id: Optional[str]     = None,
-    ):
-        self.id                   = None
-        self.name                 = name
-        self.client_name          = client_name
-        self.description          = description
-        self.tableau_server_url   = tableau_server_url
-        self.tableau_site         = tableau_site
-        self.powerbi_workspace_id = powerbi_workspace_id
-        self.created_at           = _now()
-        self.updated_at           = _now()
+    # Power BI
+    powerbi_report_name: Mapped[Optional[str]]   = mapped_column(String, nullable=True)
+    powerbi_page_name: Mapped[Optional[str]]     = mapped_column(String, nullable=True)
+    powerbi_screenshot: Mapped[Optional[str]]    = mapped_column(String, nullable=True)
 
+    # Aggregate result
+    overall_status: Mapped[str]                  = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime]                 = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime]                 = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-class ValidationRun:
-    __slots__ = [
-        "id", "project_id", "triggered_by", "status", "total_reports",
-        "passed", "failed", "needs_review", "errored", "started_at", "completed_at",
-    ]
+    # Relationships
+    project:         Mapped["MigrationProject"]       = relationship("MigrationProject", back_populates="pairs")
+    run:             Mapped[Optional["ValidationRun"]] = relationship("ValidationRun",    back_populates="pairs")
+    
+    relationship_result: Mapped[Optional["RelationshipResult"]] = relationship("RelationshipResult", back_populates="report_pair", uselist=False, cascade="all, delete-orphan")
+    semantic_result:     Mapped[Optional["SemanticResult"]]     = relationship("SemanticResult",     back_populates="report_pair", uselist=False, cascade="all, delete-orphan")
+    data_result:         Mapped[Optional["DataResult"]]         = relationship("DataResult",         back_populates="report_pair", uselist=False, cascade="all, delete-orphan")
+    visual_result:       Mapped[Optional["VisualResult"]]       = relationship("VisualResult",       back_populates="report_pair", uselist=False, cascade="all, delete-orphan")
 
-    def __init__(self, project_id: int, triggered_by: str = "manual"):
-        self.id            = None
-        self.project_id    = project_id
-        self.triggered_by  = triggered_by
-        self.status        = Status.PENDING
-        self.total_reports = 0
-        self.passed        = 0
-        self.failed        = 0
-        self.needs_review  = 0
-        self.errored       = 0
-        self.started_at    = _now()
-        self.completed_at  = None
+    def __repr__(self) -> str:
+        return f"<ReportPair id={self.id} report_name={self.report_name!r} status={self.overall_status!r}>"
 
 
-class ReportPair:
-    __slots__ = [
-        "id", "project_id", "run_id", "report_name",
-        "tableau_workbook", "tableau_view_name", "tableau_view_id",
-        "powerbi_report_name", "powerbi_page_name", "powerbi_report_id",
-        "tableau_screenshot", "powerbi_screenshot",
-        "overall_status", "overall_risk", "created_at", "updated_at",
-        # Relationship — NOT a database column; excluded from INSERT.
-        "visual_result",
-    ]
+# ---------------------------------------------------------------------------
+# 4. relationship_result  (LAYER 1)
+# ---------------------------------------------------------------------------
 
-    def __init__(
-        self,
-        project_id: int,
-        report_name: str,
-        run_id: Optional[int]                   = None,
-        tableau_workbook: Optional[str]         = None,
-        tableau_view_name: Optional[str]        = None,
-        tableau_view_id: Optional[str]          = None,
-        powerbi_report_name: Optional[str]      = None,
-        powerbi_page_name: Optional[str]        = None,
-        powerbi_report_id: Optional[str]        = None,
-        tableau_screenshot: Optional[str]       = None,
-        powerbi_screenshot: Optional[str]       = None,
-        overall_status: str                     = Status.PENDING,
-        overall_risk: Optional[str]             = None,
-        **_,  # absorb extra keyword args for forward-compatibility
-    ):
-        self.id                  = None
-        self.project_id          = project_id
-        self.run_id              = run_id
-        self.report_name         = report_name
-        self.tableau_workbook    = tableau_workbook
-        self.tableau_view_name   = tableau_view_name
-        self.tableau_view_id     = tableau_view_id
-        self.powerbi_report_name = powerbi_report_name
-        self.powerbi_page_name   = powerbi_page_name
-        self.powerbi_report_id   = powerbi_report_id
-        self.tableau_screenshot  = tableau_screenshot
-        self.powerbi_screenshot  = powerbi_screenshot
-        self.overall_status      = overall_status
-        self.overall_risk        = overall_risk
-        self.created_at          = _now()
-        self.updated_at          = _now()
-        self.visual_result       = None   # populated by session.refresh()
+class RelationshipResult(Base):
+    __tablename__ = "relationship_result"
+
+    id: Mapped[int]             = mapped_column(Integer, primary_key=True, autoincrement=True)
+    report_pair_id: Mapped[int] = mapped_column(Integer, ForeignKey("report_pair.id"), nullable=False)
+    relationships_compared: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str]         = mapped_column(String,  nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Relationships
+    report_pair: Mapped["ReportPair"] = relationship("ReportPair", back_populates="relationship_result")
+    details:     Mapped[list["RelationshipDetail"]] = relationship("RelationshipDetail", back_populates="relationship_result", cascade="all, delete-orphan")
+
+    def __repr__(self) -> str:
+        return f"<RelationshipResult id={self.id} status={self.status!r}>"
 
 
-class VisualResult:
-    __slots__ = [
-        "id", "report_pair_id", "pixel_similarity_pct", "pixel_diff_count",
-        "total_pixels", "hash_distance", "diff_image_path",
-        "compared_width", "compared_height", "gpt4o_called",
-        "chart_type_match", "color_scheme_match", "layout_match",
-        "axis_labels_match", "legend_match", "title_match", "data_labels_match",
-        "ai_summary", "ai_key_differences", "ai_recommendation", "ai_raw_response",
-        "status", "pass_threshold_pct", "gpt4o_risk_level", "created_at",
-    ]
+class RelationshipDetail(Base):
+    __tablename__ = "relationship_detail"
 
-    def __init__(
-        self,
-        report_pair_id: int,
-        status: str                              = Status.PENDING,
-        pixel_similarity_pct: Optional[float]   = None,
-        pixel_diff_count: Optional[int]         = None,
-        total_pixels: Optional[int]             = None,
-        hash_distance: Optional[int]            = None,
-        diff_image_path: Optional[str]          = None,
-        compared_width: Optional[int]           = None,
-        compared_height: Optional[int]          = None,
-        gpt4o_called: bool                      = False,
-        chart_type_match: Optional[bool]        = None,
-        color_scheme_match: Optional[bool]      = None,
-        layout_match: Optional[bool]            = None,
-        axis_labels_match: Optional[bool]       = None,
-        legend_match: Optional[bool]            = None,
-        title_match: Optional[bool]             = None,
-        data_labels_match: Optional[bool]       = None,
-        ai_summary: Optional[str]               = None,
-        ai_key_differences: Optional[str]       = None,
-        ai_recommendation: Optional[str]        = None,
-        ai_raw_response: Optional[str]          = None,
-        pass_threshold_pct: float               = 95.0,
-        gpt4o_risk_level: Optional[str]         = None,
-        id: Optional[int]                       = None,
-        **_,
-    ):
-        self.id                   = id
-        self.report_pair_id       = report_pair_id
-        self.pixel_similarity_pct = pixel_similarity_pct
-        self.pixel_diff_count     = pixel_diff_count
-        self.total_pixels         = total_pixels
-        self.hash_distance        = hash_distance
-        self.diff_image_path      = diff_image_path
-        self.compared_width       = compared_width
-        self.compared_height      = compared_height
-        self.gpt4o_called         = gpt4o_called
-        self.chart_type_match     = chart_type_match
-        self.color_scheme_match   = color_scheme_match
-        self.layout_match         = layout_match
-        self.axis_labels_match    = axis_labels_match
-        self.legend_match         = legend_match
-        self.title_match          = title_match
-        self.data_labels_match    = data_labels_match
-        self.ai_summary           = ai_summary
-        self.ai_key_differences   = ai_key_differences
-        self.ai_recommendation    = ai_recommendation
-        self.ai_raw_response      = ai_raw_response
-        self.status               = status
-        self.pass_threshold_pct   = pass_threshold_pct
-        self.gpt4o_risk_level     = gpt4o_risk_level
-        self.created_at           = _now()
+    id: Mapped[int]                      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    relationship_result_id: Mapped[int]  = mapped_column(Integer, ForeignKey("relationship_result.id"), nullable=False)
+    source_desc: Mapped[str]             = mapped_column(String, nullable=False)  # e.g. "Orders[CustomerID]"
+    target_desc: Mapped[str]             = mapped_column(String, nullable=False) 
+    type: Mapped[str]                    = mapped_column(String, nullable=False)  # MATCH, MISSING, MISMATCH
+    detail: Mapped[Optional[str]]        = mapped_column(Text,   nullable=True)
+    created_at: Mapped[datetime]         = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Relationships
+    relationship_result: Mapped["RelationshipResult"] = relationship("RelationshipResult", back_populates="details")
 
 
-class SemanticResult:
-    __slots__ = [
-        "id", "report_pair_id", "total_fields", "matched_fields",
-        "flagged_fields", "manual_review_fields", "status", "created_at",
-    ]
+# ---------------------------------------------------------------------------
+# 5. visual_result  (RESERVED FOR FUTURE)
+# ---------------------------------------------------------------------------
 
-    def __init__(
-        self,
-        report_pair_id: int,
-        total_fields: int      = 0,
-        matched_fields: int    = 0,
-        flagged_fields: int    = 0,
-        manual_review_fields: int = 0,
-        status: str            = Status.PENDING,
-    ):
-        self.id                  = None
-        self.report_pair_id      = report_pair_id
-        self.total_fields        = total_fields
-        self.matched_fields      = matched_fields
-        self.flagged_fields      = flagged_fields
-        self.manual_review_fields= manual_review_fields
-        self.status              = status
-        self.created_at          = _now()
+class VisualResult(Base):
+    __tablename__ = "visual_result"
+
+    id: Mapped[int]             = mapped_column(Integer, primary_key=True, autoincrement=True)
+    report_pair_id: Mapped[int] = mapped_column(Integer, ForeignKey("report_pair.id"), nullable=False)
+    
+    # Pixel diff / GPT-4o Vision placeholders
+    pixel_similarity_pct: Mapped[Optional[float]] = mapped_column(Float,   nullable=True)
+    ai_summary:          Mapped[Optional[str]]     = mapped_column(Text,    nullable=True)
+    status:             Mapped[str]                = mapped_column(String, nullable=False)
+    created_at:         Mapped[datetime]           = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Relationships
+    report_pair: Mapped["ReportPair"] = relationship("ReportPair", back_populates="visual_result")
 
 
-class CalcField:
-    __slots__ = [
-        "id", "semantic_result_id", "field_name", "tableau_formula",
-        "dax_from_pbix", "claude_dax_suggested", "is_equivalent", "risk_level",
-        "differences", "edge_cases", "ai_explanation", "status", "created_at",
-    ]
+# ---------------------------------------------------------------------------
+# 6. semantic_result  (LAYER 2)
+# ---------------------------------------------------------------------------
 
-    def __init__(
-        self,
-        semantic_result_id: int,
-        field_name: str,
-        tableau_formula: Optional[str]      = None,
-        dax_from_pbix: Optional[str]        = None,
-        claude_dax_suggested: Optional[str] = None,
-        is_equivalent: Optional[bool]       = None,
-        risk_level: Optional[str]           = None,
-        differences: Optional[str]          = None,
-        edge_cases: Optional[str]           = None,
-        ai_explanation: Optional[str]       = None,
-        status: str                         = Status.PENDING,
-    ):
-        self.id                   = None
-        self.semantic_result_id   = semantic_result_id
-        self.field_name           = field_name
-        self.tableau_formula      = tableau_formula
-        self.dax_from_pbix        = dax_from_pbix
-        self.claude_dax_suggested = claude_dax_suggested
-        self.is_equivalent        = is_equivalent
-        self.risk_level           = risk_level
-        self.differences          = differences
-        self.edge_cases           = edge_cases
-        self.ai_explanation       = ai_explanation
-        self.status               = status
-        self.created_at           = _now()
+class SemanticResult(Base):
+    __tablename__ = "semantic_result"
+
+    id: Mapped[int]             = mapped_column(Integer, primary_key=True, autoincrement=True)
+    report_pair_id: Mapped[int] = mapped_column(Integer, ForeignKey("report_pair.id"), nullable=False)
+    total_fields:   Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    matched_fields: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    flagged_fields: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status:         Mapped[str] = mapped_column(String,  nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Relationships
+    report_pair:  Mapped["ReportPair"]         = relationship("ReportPair",  back_populates="semantic_result")
+    calc_fields:  Mapped[list["CalcField"]]    = relationship("CalcField",   back_populates="semantic_result", cascade="all, delete-orphan")
+
+    def __repr__(self) -> str:
+        return f"<SemanticResult id={self.id} status={self.status!r}>"
 
 
-class DataResult:
-    __slots__ = [
-        "id", "report_pair_id", "tableau_row_count", "powerbi_row_count",
-        "row_count_match", "total_kpis_checked", "kpis_matched",
-        "kpis_mismatched", "status", "created_at",
-    ]
+class CalcField(Base):
+    __tablename__ = "calc_field"
 
-    def __init__(
-        self,
-        report_pair_id: int,
-        tableau_row_count: Optional[int] = None,
-        powerbi_row_count: Optional[int] = None,
-        row_count_match: Optional[bool]  = None,
-        total_kpis_checked: int          = 0,
-        kpis_matched: int                = 0,
-        kpis_mismatched: int             = 0,
-        status: str                      = Status.PENDING,
-    ):
-        self.id                = None
-        self.report_pair_id    = report_pair_id
-        self.tableau_row_count = tableau_row_count
-        self.powerbi_row_count = powerbi_row_count
-        self.row_count_match   = row_count_match
-        self.total_kpis_checked= total_kpis_checked
-        self.kpis_matched      = kpis_matched
-        self.kpis_mismatched   = kpis_mismatched
-        self.status            = status
-        self.created_at        = _now()
+    id: Mapped[int]                        = mapped_column(Integer, primary_key=True, autoincrement=True)
+    semantic_result_id: Mapped[int]        = mapped_column(Integer, ForeignKey("semantic_result.id"), nullable=False)
+    field_name: Mapped[str]                = mapped_column(String, nullable=False)
+    tableau_formula: Mapped[Optional[str]] = mapped_column(Text,   nullable=True)
+    dax_from_pbix:   Mapped[Optional[str]] = mapped_column(Text,   nullable=True)
+    is_equivalent:   Mapped[Optional[bool]]= mapped_column(Boolean,nullable=True)
+    differences:     Mapped[Optional[str]] = mapped_column(Text,   nullable=True)
+    ai_explanation:  Mapped[Optional[str]] = mapped_column(Text,   nullable=True)
+    status: Mapped[str]                    = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime]           = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Relationships
+    semantic_result: Mapped["SemanticResult"] = relationship("SemanticResult", back_populates="calc_fields")
 
 
-class KpiComparison:
-    __slots__ = [
-        "id", "data_result_id", "metric_name", "aggregation_type",
-        "tableau_value", "powerbi_value", "absolute_diff",
-        "percentage_diff", "is_match", "tolerance_pct", "created_at",
-    ]
+# ---------------------------------------------------------------------------
+# 7. data_result  (LAYER 3)
+# ---------------------------------------------------------------------------
 
-    def __init__(
-        self,
-        data_result_id: int,
-        metric_name: str,
-        aggregation_type: Optional[str] = None,
-        tableau_value: Optional[float]  = None,
-        powerbi_value: Optional[float]  = None,
-        absolute_diff: Optional[float]  = None,
-        percentage_diff: Optional[float]= None,
-        is_match: Optional[bool]        = None,
-        tolerance_pct: float            = 0.01,
-    ):
-        self.id              = None
-        self.data_result_id  = data_result_id
-        self.metric_name     = metric_name
-        self.aggregation_type= aggregation_type
-        self.tableau_value   = tableau_value
-        self.powerbi_value   = powerbi_value
-        self.absolute_diff   = absolute_diff
-        self.percentage_diff = percentage_diff
-        self.is_match        = is_match
-        self.tolerance_pct   = tolerance_pct
-        self.created_at      = _now()
+class DataResult(Base):
+    __tablename__ = "data_result"
+
+    id: Mapped[int]             = mapped_column(Integer, primary_key=True, autoincrement=True)
+    report_pair_id: Mapped[int] = mapped_column(Integer, ForeignKey("report_pair.id"), nullable=False)
+    tables_compared: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status:          Mapped[str] = mapped_column(String,  nullable=False)
+    created_at:      Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Relationships
+    report_pair:       Mapped["ReportPair"]           = relationship("ReportPair", back_populates="data_result")
+    table_comparisons: Mapped[list["TableComparison"]] = relationship("TableComparison", back_populates="data_result", cascade="all, delete-orphan")
+
+    def __repr__(self) -> str:
+        return f"<DataResult id={self.id} status={self.status!r}>"
 
 
-# ── Table name registry ────────────────────────────────────────────────────────
+class TableComparison(Base):
+    __tablename__ = "table_comparison"
 
-_TABLE_MAP: dict[str, str] = {
-    "MigrationProject": "migration_project",
-    "ValidationRun":    "validation_run",
-    "ReportPair":       "report_pair",
-    "VisualResult":     "visual_result",
-    "SemanticResult":   "semantic_result",
-    "CalcField":        "calc_field",
-    "DataResult":       "data_result",
-    "KpiComparison":    "kpi_comparison",
-}
+    id: Mapped[int]                          = mapped_column(Integer, primary_key=True, autoincrement=True)
+    data_result_id: Mapped[int]              = mapped_column(Integer, ForeignKey("data_result.id"), nullable=False)
+    table_name: Mapped[str]                  = mapped_column(String, nullable=False)
+    result:     Mapped[str]                  = mapped_column(String, nullable=False)
+    row_count_twbx:    Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    row_count_pbix:    Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    row_count_diff_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    failure_reasons:   Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime]             = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
-
-def _table_for(obj) -> str:
-    """Return the database table name for a model instance."""
-    class_name = type(obj).__name__
-    try:
-        return _TABLE_MAP[class_name]
-    except KeyError:
-        raise TypeError(
-            f"Unknown model class {class_name!r}. "
-            f"Known classes: {list(_TABLE_MAP.keys())}"
-        )
+    # Relationships
+    data_result: Mapped["DataResult"] = relationship("DataResult", back_populates="table_comparisons")
 
 
-# ── Session ────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# DB initialisation helper
+# ---------------------------------------------------------------------------
 
-class Session:
+def init_db(db_url: str = "sqlite:///migrateiq.db") -> "Engine":
+    """Create all tables and return the engine."""
+    from sqlalchemy import create_engine
+    engine = create_engine(db_url, echo=False)
+    Base.metadata.create_all(engine)
+    return engine
+
+
+# ---------------------------------------------------------------------------
+# Persist JSON Result
+# ---------------------------------------------------------------------------
+
+def save_comparison_result(session, result_json: dict, project_id: int, run_id: Optional[int] = None) -> ReportPair:
     """
-    Lightweight sqlite3 session that mirrors enough of the SQLAlchemy Session
-    API that pipeline code does not need to change when switching to SQLAlchemy.
-
-    Supported: add(), flush(), commit(), refresh(), query().
+    Persist the full 3-layer JSON result into the normalised schema.
     """
+    inputs = result_json.get("inputs", {})
+    cats   = result_json.get("categories", {})
+    
+    # Helper to clean filenames
+    def clean(name: str):
+        if not name: return ""
+        import re
+        # Strip 36-char UUID prefix and any file extension
+        name = re.sub(r'^[0-9a-fA-F-]{36}_', '', name)
+        return re.sub(r'\.[^/.]+$', '', name)
 
-    def __init__(self, conn: sqlite3.Connection):
-        self._conn    = conn
-        self._pending: list = []
+    twName = clean(inputs.get("twbx_file"))
+    pbName = clean(inputs.get("pbix_file"))
 
-    # ── Write methods ─────────────────────────────────────────────────────────
+    # 1. Report Pair
+    pair = ReportPair(
+        project_id     = project_id,
+        run_id         = run_id,
+        report_name    = f"{twName} vs {pbName}",
+        tableau_workbook   = twName,
+        powerbi_report_name= pbName,
+        overall_status = result_json.get("overall_result", "PENDING"),
+    )
+    session.add(pair)
+    session.flush()
 
-    def add(self, obj) -> None:
-        """Stage an object for INSERT on the next commit/flush."""
-        self._pending.append(obj)
+    # 2. Layer 1: Relationships
+    rel_cat = cats.get("relationships", {})
+    rel_res = RelationshipResult(
+        report_pair_id = pair.id,
+        relationships_compared = rel_cat.get("relationships_compared", 0),
+        status = rel_cat.get("result", "PENDING")
+    )
+    session.add(rel_res)
+    session.flush()
 
-    def flush(self) -> None:
-        """Write all pending objects to the DB and populate their .id attributes."""
-        for obj in self._pending:
-            self._insert(obj)
-        self._pending.clear()
+    rel_details = rel_cat.get("details", {})
+    for item in rel_details.get("relationships_matched", []):
+        session.add(RelationshipDetail(
+            relationship_result_id = rel_res.id,
+            source_desc = item.get("from", "unknown"),
+            target_desc = item.get("to", "unknown"),
+            type = "MATCH"
+        ))
+    for item in rel_details.get("relationships_missing_in_pbix", []):
+        session.add(RelationshipDetail(
+            relationship_result_id = rel_res.id,
+            source_desc = str(item),
+            target_desc = "MISSING",
+            type = "MISSING",
+            detail = "Missing in Power BI"
+        ))
 
-    def commit(self) -> None:
-        """Flush pending objects then commit the transaction."""
-        self.flush()
-        self._conn.commit()
+    # 3. Layer 2: Semantic Model
+    sem_cat = cats.get("semantic_model", {})
+    sem_details = sem_cat.get("details", {})
+    semantic = SemanticResult(
+        report_pair_id = pair.id,
+        total_fields   = sem_cat.get("measures_compared", 0),
+        matched_fields = len(sem_details.get("measures_matched", [])),
+        flagged_fields = len(sem_details.get("expression_mismatches", [])),
+        status         = sem_cat.get("result", "PENDING"),
+    )
+    session.add(semantic)
+    session.flush()
 
-    def refresh(self, obj) -> None:
-        """
-        Reload an object's column attributes from the DB.
-        For ReportPair, also loads the associated VisualResult into obj.visual_result.
-        """
-        table = _table_for(obj)
-        row   = self._conn.execute(
-            f"SELECT * FROM {table} WHERE id = ?", (obj.id,)
-        ).fetchone()
+    for mismatch in sem_details.get("expression_mismatches", []):
+        session.add(CalcField(
+            semantic_result_id = semantic.id,
+            field_name = mismatch.get("field_name", "unknown"),
+            tableau_formula = mismatch.get("tableau_formula"),
+            dax_from_pbix = mismatch.get("dax_expression"),
+            is_equivalent = mismatch.get("is_equivalent"),
+            differences = mismatch.get("differences"),
+            ai_explanation = mismatch.get("ai_explanation"),
+            status = "MISMATCH"
+        ))
 
-        if row:
-            for k, v in dict(row).items():
-                if hasattr(obj, k):
-                    setattr(obj, k, v)
+    # 4. Layer 3: Data
+    data_cat = cats.get("data", {})
+    data_res = DataResult(
+        report_pair_id = pair.id,
+        tables_compared = data_cat.get("tables_compared", 0),
+        status = data_cat.get("result", "PENDING")
+    )
+    session.add(data_res)
+    session.flush()
 
-        # Eagerly load the VisualResult relationship for ReportPair.
-        if table == "report_pair":
-            vr_row = self._conn.execute(
-                "SELECT * FROM visual_result WHERE report_pair_id = ? "
-                "ORDER BY id DESC LIMIT 1",
-                (obj.id,),
-            ).fetchone()
+    for detail in data_cat.get("details", []):
+        session.add(TableComparison(
+            data_result_id = data_res.id,
+            table_name = detail.get("table_name", "unknown"),
+            result = detail.get("result", "PENDING"),
+            row_count_twbx = detail.get("row_count_twbx"),
+            row_count_pbix = detail.get("row_count_pbix"),
+            row_count_diff_pct = detail.get("row_count_diff_pct"),
+            failure_reasons = ", ".join(detail.get("failure_reasons", []))
+        ))
 
-            if vr_row:
-                d  = dict(vr_row)
-                vr = VisualResult(report_pair_id=obj.id)
-                for k, v in d.items():
-                    if k in VisualResult.__slots__:
-                        setattr(vr, k, v)
-                obj.visual_result = vr
-            else:
-                obj.visual_result = None
-
-    # ── Query helpers ─────────────────────────────────────────────────────────
-
-    def query(self, *models):
-        """Return a _Query builder for the given model class(es)."""
-        return _Query(self._conn, models)
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
-
-    def _insert(self, obj) -> None:
-        """
-        Build and execute an INSERT statement from a model's __slots__.
-
-        Non-column slots (e.g. relationship fields like visual_result) are
-        excluded via _NON_COLUMN_SLOTS, preventing accidental SQL errors when
-        new relationship slots are added to a model.
-        """
-        table = _table_for(obj)
-        data  = {
-            k: getattr(obj, k, None)
-            for k in obj.__slots__
-            if k != "id"
-            and not k.startswith("_")
-            and k not in _NON_COLUMN_SLOTS
-        }
-        cols = ", ".join(data.keys())
-        phs  = ", ".join("?" * len(data))
-        cur  = self._conn.execute(
-            f"INSERT INTO {table} ({cols}) VALUES ({phs})",
-            list(data.values()),
-        )
-        obj.id = cur.lastrowid
-        logger.debug("Inserted %s id=%d into %s", type(obj).__name__, obj.id, table)
-
-    def close(self) -> None:
-        """Close the underlying database connection."""
-        self._conn.close()
-
-
-class _Query:
-    """
-    Minimal query builder for test and dashboard assertions.
-    Supports the two query patterns used by the test suite and FastAPI backend.
-    """
-
-    def __init__(self, conn: sqlite3.Connection, models: tuple):
-        self._conn    = conn
-        self._models  = models
-        self._filters : list = []
-        self._groups  : list = []
-
-    def join(self, model, condition=None):
-        # Joins are implicit in the two-model all() path; this is a no-op stub
-        # so the call chain `session.query(A, B).join(B, ...).filter(...).all()` works.
-        return self
-
-    def filter(self, *conditions):
-        self._filters.extend(conditions)
-        return self
-
-    def group_by(self, *cols):
-        self._groups.extend(cols)
-        return self
-
-    def all(self) -> list:
-        """
-        Execute the query and return results.
-
-        Two supported patterns:
-          1. query(ReportPair, VisualResult) → list of (ReportPair, VisualResult) tuples
-          2. query(ReportPair).group_by(...) → list of (status, count) tuples
-        """
-        if len(self._models) == 2:
-            return self._fetch_pair_results()
-
-        if self._groups:
-            return self._fetch_status_counts()
-
-        return []
-
-    def _fetch_pair_results(self) -> list[tuple]:
-        """JOIN report_pair with visual_result and return typed object pairs."""
-        # Build optional WHERE clause from project_id filters.
-        where_clause = ""
-        params: list = []
-        for condition in self._filters:
-            # Conditions are passed as pseudo-expressions; we parse project_id filters.
-            if hasattr(condition, "_project_id_filter"):
-                where_clause = "WHERE rp.project_id = ?"
-                params.append(condition._project_id_filter)
-                break
-
-        rows = self._conn.execute(f"""
-            SELECT
-                rp.id, rp.project_id, rp.run_id, rp.report_name,
-                rp.tableau_workbook, rp.tableau_view_name, rp.tableau_view_id,
-                rp.powerbi_report_name, rp.powerbi_page_name, rp.powerbi_report_id,
-                rp.tableau_screenshot, rp.powerbi_screenshot,
-                rp.overall_status, rp.overall_risk, rp.created_at, rp.updated_at,
-                vr.id              AS vr_id,
-                vr.pixel_similarity_pct,
-                vr.status          AS vr_status,
-                vr.gpt4o_called,
-                vr.ai_summary,
-                vr.ai_key_differences,
-                vr.diff_image_path,
-                vr.hash_distance,
-                vr.pixel_diff_count,
-                vr.total_pixels,
-                vr.compared_width,
-                vr.compared_height,
-                vr.pass_threshold_pct,
-                vr.gpt4o_risk_level
-            FROM report_pair rp
-            JOIN visual_result vr ON rp.id = vr.report_pair_id
-            {where_clause}
-        """, params).fetchall()
-
-        results = []
-        for r in rows:
-            d    = dict(r)
-            pair = ReportPair(
-                project_id          = d["project_id"],
-                report_name         = d["report_name"],
-                run_id              = d.get("run_id"),
-                tableau_workbook    = d.get("tableau_workbook"),
-                tableau_view_name   = d.get("tableau_view_name"),
-                powerbi_report_name = d.get("powerbi_report_name"),
-                powerbi_page_name   = d.get("powerbi_page_name"),
-                tableau_screenshot  = d.get("tableau_screenshot"),
-                powerbi_screenshot  = d.get("powerbi_screenshot"),
-                overall_status      = d.get("overall_status", Status.PENDING),
-                overall_risk        = d.get("overall_risk"),
-            )
-            pair.id = d["id"]
-
-            vr = VisualResult(
-                id                   = d.get("vr_id"),
-                report_pair_id       = d["id"],
-                pixel_similarity_pct = d.get("pixel_similarity_pct"),
-                status               = d.get("vr_status", Status.PENDING),
-                gpt4o_called         = bool(d.get("gpt4o_called")),
-                ai_summary           = d.get("ai_summary"),
-                ai_key_differences   = d.get("ai_key_differences"),
-                diff_image_path      = d.get("diff_image_path"),
-                hash_distance        = d.get("hash_distance"),
-                pixel_diff_count     = d.get("pixel_diff_count"),
-                total_pixels         = d.get("total_pixels"),
-                compared_width       = d.get("compared_width"),
-                compared_height      = d.get("compared_height"),
-                pass_threshold_pct   = d.get("pass_threshold_pct", 95.0),
-                gpt4o_risk_level     = d.get("gpt4o_risk_level"),
-            )
-            results.append((pair, vr))
-
-        return results
-
-    def _fetch_status_counts(self) -> list[tuple]:
-        """Return overall_status distribution for all report pairs."""
-        rows = self._conn.execute(
-            "SELECT overall_status, COUNT(id) FROM report_pair GROUP BY overall_status"
-        ).fetchall()
-        return [(row[0], row[1]) for row in rows]
+    return pair
 
 
-# ── DB setup helpers ───────────────────────────────────────────────────────────
-
-def get_engine(db_url: str = DB_URL) -> sqlite3.Connection:
-    """
-    Return a sqlite3 Connection.
-
-    Args:
-        db_url: sqlite:///path/to/db.db  OR  a bare filesystem path
-
-    Returns:
-        sqlite3.Connection with row_factory set to sqlite3.Row
-    """
-    path = db_url.replace("sqlite:///", "") if db_url.startswith("sqlite") else db_url
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    logger.debug("Opened database: %s", path)
-    return conn
+if __name__ == "__main__":
+    # Test initialization
+    engine = init_db("sqlite:///migrateiq.db")
+    print("Database initialized.")
 
 
-def create_tables(engine: sqlite3.Connection) -> None:
-    """Create all tables if they do not already exist."""
-    engine.executescript(_DDL)
-    engine.commit()
-    logger.debug("Database tables created/verified.")
+# ---------------------------------------------------------------------------
+# Entry-point
+# ---------------------------------------------------------------------------
 
+if __name__ == "__main__":
+    import json
+    from sqlalchemy.orm import sessionmaker
 
-def get_session(engine: sqlite3.Connection) -> Session:
-    """Return a Session wrapping the provided sqlite3 Connection."""
-    return Session(engine)
+    engine  = init_db("sqlite:///migrateiq.db")
+    Session = sessionmaker(bind=engine)
+
+    # Create a default project
+    with Session() as session:
+        project = MigrationProject(name="Default Migration Project")
+        session.add(project)
+        session.commit()
+
+        # Load and save example JSON files (adjust paths as needed)
+        sample_files = [
+            "ebce2643-9056-4a33-b58b-dcfcfa95c003.json",
+            "adfa3a77-5f9a-4f19-9fde-b7d800791546.json",
+            "a3b26d57-f012-4a94-b254-b0772aa1688a.json",
+            "3651b608-0b75-4129-9a3e-4bbbaf85ab73.json",
+        ]
+        for path in sample_files:
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                pair = save_comparison_result(session, data, project_id=project.id)
+                print(f"Saved: {pair}")
+            except FileNotFoundError:
+                print(f"File not found (skipped): {path}")
+
+        session.commit()
+        print("Done.")
