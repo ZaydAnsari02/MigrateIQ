@@ -279,6 +279,34 @@ async def validate_reports(
         )
 
 
+def _visual_diff_type(detail: str) -> str:
+    """Derive a human-readable difference type from the AI-generated detail text."""
+    d = detail.lower()
+    if any(k in d for k in ("chart type", "bar chart", "pie chart", "line chart", "stacked bar", "donut", "scatter")):
+        return "Chart Type Difference"
+    if any(k in d for k in ("color scheme", "colour scheme", "color differ", "colour differ", "shade of", "palette")):
+        return "Color Scheme Difference"
+    if "legend" in d:
+        return "Legend Difference"
+    if "title" in d:
+        return "Title Difference"
+    if "data label" in d:
+        return "Data Labels Difference"
+    if any(k in d for k in ("axis", "x-axis", "y-axis", "axis label")):
+        return "Axis Labels Difference"
+    if any(k in d for k in ("filter", "slicer")):
+        return "Filter Difference"
+    if any(k in d for k in ("layout", "position", "alignment")):
+        return "Layout Difference"
+    if any(k in d for k in ("missing", "absent", "not present", "not found")):
+        return "Missing Element"
+    if any(k in d for k in ("tooltip", "hover")):
+        return "Tooltip Difference"
+    if any(k in d for k in ("font", "text size", "font size")):
+        return "Text Style Difference"
+    return "Visual Difference"
+
+
 # ─── GET /report-pairs ────────────────────────────────────────────────────────
 @app.get("/report-pairs")
 async def list_report_pairs(db: Session = Depends(get_db)):
@@ -313,7 +341,7 @@ async def list_report_pairs(db: Session = Depends(get_db)):
                     visual_diffs = json.loads(p.visual_result.ai_key_differences)
                     for vd in visual_diffs:
                         differences.append({
-                            "type": "Visual Dismatch",
+                            "type": _visual_diff_type(vd),
                             "detail": vd,
                             "severity": "medium",
                             "layer": "L1"

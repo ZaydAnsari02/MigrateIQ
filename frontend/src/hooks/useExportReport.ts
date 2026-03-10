@@ -244,9 +244,17 @@ export function useExportReport() {
         doc.text(ts, COL.ts.x + 4, rY);
 
         badge(pair.overallStatus, COL.ovr.x + 4, rY);
-        badge(pair.layer1Status,  COL.l1.x + 2,  rY, 42);
-        badge(pair.layer2Status,  COL.l2.x + 2,  rY, 42);
-        badge(pair.layer3Status,  COL.l3.x + 2,  rY, 42);
+        const layerBadge = (status: string, x: number, y2: number) => {
+          if (status === "skipped") {
+            setFont(9, MID, "bold");
+            doc.text("—", x + 21, y2, { align: "center" });
+          } else {
+            badge(status, x, y2, 42);
+          }
+        };
+        layerBadge(pair.layer1Status, COL.l1.x + 2,  rY);
+        layerBadge(pair.layer2Status, COL.l2.x + 2,  rY);
+        layerBadge(pair.layer3Status, COL.l3.x + 2,  rY);
 
         y += ROW_H;
       });
@@ -330,7 +338,12 @@ export function useExportReport() {
           doc.line(PAD, y + 20, W - PAD, y + 20);
           setFont(8.5, DARK);
           doc.text(l.label, PAD + 8, y + 13);
-          badge(l.status, W - PAD - 52, y + 13, 48);
+          if (l.status === "skipped") {
+            setFont(9, MID, "bold");
+            doc.text("—", W - PAD - 28, y + 13, { align: "center" });
+          } else {
+            badge(l.status, W - PAD - 52, y + 13, 48);
+          }
           y += 20;
         });
 

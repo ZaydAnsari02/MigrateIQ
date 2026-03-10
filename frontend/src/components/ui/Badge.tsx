@@ -40,7 +40,6 @@ export function LayerDot({ status, label, className }: LayerDotProps) {
         title="Screenshots not provided"
       >
         <span className="text-[10px] text-slate-400 font-bold">—</span>
-        {label && <span className="text-[10px] text-slate-400">N/A</span>}
       </span>
     );
   }
