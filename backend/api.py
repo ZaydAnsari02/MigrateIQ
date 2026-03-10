@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Optional
+
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,7 +19,8 @@ sys.path.append(str(BACKEND_DIR))
 
 from auth import USERS
 import config
-from db.models import init_db, save_comparison_result, MigrationProject, ReportPair, ValidationRun
+from db.models import init_db, save_comparison_result, MigrationProject, ReportPair, ValidationRun, Status, VisualResult
+from visual.pipeline import run_visual_validation
 
 # ─── Database Setup ───────────────────────────────────────────────────────────
 engine = init_db(config.DB_URL)
@@ -45,6 +47,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi.staticfiles import StaticFiles
+(BACKEND_DIR / "screenshots").mkdir(exist_ok=True)
+app.mount("/screenshots", StaticFiles(directory=str(BACKEND_DIR / "screenshots")), name="screenshots")
+
 # ─── Directories ──────────────────────────────────────────────────────────────
 (BACKEND_DIR / "temp").mkdir(exist_ok=True)
 (BACKEND_DIR / "results").mkdir(exist_ok=True)
@@ -67,6 +73,20 @@ def startup_event():
     db.close()
 
 
+def get_screenshot_url(absolute_path: str | None) -> str | None:
+    if not absolute_path: return None
+    try:
+        p = Path(absolute_path)
+        parts = p.parts
+        if "screenshots" in parts:
+            idx = parts.index("screenshots")
+            rel = Path(*parts[idx+1:])
+            return f"{config.BASE_URL}/screenshots/{rel.as_posix()}"
+        return f"{config.BASE_URL}/screenshots/{p.name}"
+    except:
+        return f"{config.BASE_URL}/screenshots/{Path(absolute_path).name}" if absolute_path else None
+
+
 # ─── In-memory session store ──────────────────────────────────────────────────
 # Maps token → username. Resets on server restart (sufficient for development).
 SESSIONS: dict[str, str] = {}
@@ -77,6 +97,8 @@ SESSIONS: dict[str, str] = {}
 async def validate_reports(
     twbx: UploadFile = File(...),
     pbix:  UploadFile = File(...),
+    tableau_screenshot: Optional[UploadFile] = File(None),
+    pbi_screenshot: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     x_token: Optional[str] = Header(None),
 ):
@@ -152,6 +174,40 @@ async def validate_reports(
         with open(output_path) as f:
             result = json.load(f)
 
+        # ─── Screenshot Handling ────────────────────────────────────────────────
+        tab_screenshot_path = None
+        pbi_screenshot_path = None
+
+        def process_screenshot(file: UploadFile, suffix: str) -> Optional[str]:
+            if not file: return None
+            target_dir = BACKEND_DIR / "screenshots"
+            target_dir.mkdir(exist_ok=True)
+            
+            temp_path = BACKEND_DIR / "temp" / f"{run_id}_{suffix}_{file.filename}"
+            with open(temp_path, "wb") as f:
+                shutil.copyfileobj(file.file, f)
+            
+            if file.filename.lower().endswith(".zip"):
+                import zipfile
+                extract_dir = BACKEND_DIR / "temp" / f"{run_id}_{suffix}_extracted"
+                extract_dir.mkdir(exist_ok=True)
+                with zipfile.ZipFile(temp_path, 'r') as zip_ref:
+                    zip_ref.extractall(extract_dir)
+                # Find the first image
+                for p in extract_dir.rglob("*"):
+                    if p.suffix.lower() in (".png", ".jpg", ".jpeg"):
+                        final_path = target_dir / f"{run_id}_{suffix}{p.suffix}"
+                        shutil.copy(p, final_path)
+                        return f"screenshots/{final_path.name}"
+                return None
+            else:
+                final_path = target_dir / f"{run_id}_{suffix}{Path(file.filename).suffix}"
+                shutil.move(str(temp_path), str(final_path))
+                return f"screenshots/{final_path.name}"
+
+        tab_screenshot_path = process_screenshot(tableau_screenshot, "tableau")
+        pbi_screenshot_path = process_screenshot(pbi_screenshot, "pbi")
+
         # ─── Persist to DB ───────────────────────────────────────────────────────
         try:
             # Update the ValidationRun
@@ -161,11 +217,42 @@ async def validate_reports(
             v_run.completed_at = datetime.utcnow()
             
             # Save the report pair details
-            save_comparison_result(db, result, project_id=project.id, run_id=v_run.id)
+            pair = save_comparison_result(
+                db, result, 
+                project_id         = project.id, 
+                run_id             = v_run.id,
+                tableau_screenshot = tab_screenshot_path,
+                powerbi_screenshot = pbi_screenshot_path
+            )
             db.commit()
+            
+            # ─── Layer 1: Visual Validation ───────────────────────────────────
+            if tab_screenshot_path and pbi_screenshot_path:
+                try:
+                    run_visual_validation(
+                        db, pair,
+                        openai_api_key  = config.OPENAI_API_KEY,
+                        diff_output_dir = str(BACKEND_DIR / "screenshots" / "diffs")
+                    )
+                    # Status is updated and committed inside run_visual_validation;
+                    # refresh pair so overall_status reflects those DB writes.
+                    db.refresh(pair)
+                except Exception as ve:
+                    print(f"Visual validation failed: {ve}")
+
+            # Always sync the run's final status from the pair (with or without screenshots).
+            # Normalize to uppercase — the visual pipeline stores lowercase via Status constants.
+            db.refresh(pair)
+            db.refresh(v_run)
+            v_run.status = pair.overall_status.upper()
+            v_run.passed = 1 if pair.overall_status.lower() == "pass" else 0
+            v_run.failed = 1 if pair.overall_status.lower() == "fail" else 0
+            db.commit()
+            
         except Exception as e:
             db.rollback()
             print(f"FAILED TO SAVE TO DB: {e}")
+            traceback.print_exc()
 
         # Attach the run_id so the frontend can reference it later
         result["run_id"] = run_id
@@ -173,6 +260,10 @@ async def validate_reports(
         # Clean up temp input files
         Path(twbx_path).unlink(missing_ok=True)
         Path(pbix_path).unlink(missing_ok=True)
+        
+        # Clean up screenshot temp files and extracted dirs
+        shutil.rmtree(str(BACKEND_DIR / "temp"), ignore_errors=True)
+        (BACKEND_DIR / "temp").mkdir(exist_ok=True)
 
         return result
     except HTTPException:
@@ -196,7 +287,8 @@ async def list_report_pairs(db: Session = Depends(get_db)):
     pairs = db.query(ReportPair).options(
         joinedload(ReportPair.relationship_result).joinedload(RelationshipResult.details),
         joinedload(ReportPair.semantic_result).joinedload(SemanticResult.calc_fields),
-        joinedload(ReportPair.data_result).joinedload(DataResult.table_comparisons)
+        joinedload(ReportPair.data_result).joinedload(DataResult.table_comparisons),
+        joinedload(ReportPair.visual_result)
     ).order_by(ReportPair.created_at.desc()).all()
     
     output = []
@@ -213,6 +305,21 @@ async def list_report_pairs(db: Session = Depends(get_db)):
                         "severity": "high",
                         "layer": "L1"
                     })
+        
+        # Layer 1: Visual (Mismatches from AI)
+        if p.visual_result and p.visual_result.status != "PASS":
+            if p.visual_result.ai_key_differences:
+                try:
+                    visual_diffs = json.loads(p.visual_result.ai_key_differences)
+                    for vd in visual_diffs:
+                        differences.append({
+                            "type": "Visual Dismatch",
+                            "detail": vd,
+                            "severity": "medium",
+                            "layer": "L1"
+                        })
+                except:
+                    pass
         
         # Layer 2: Semantic Model
         if p.semantic_result:
@@ -241,14 +348,25 @@ async def list_report_pairs(db: Session = Depends(get_db)):
             "runId": str(p.run_id) if p.run_id else None,
             "reportName": p.report_name,
             "overallStatus": p.overall_status,
-            "layer1Status": p.relationship_result.status if p.relationship_result else "PENDING",
+            "layer1Status": p.visual_result.status if p.visual_result else "skipped",
             "layer2Status": p.semantic_result.status if p.semantic_result else "PENDING",
             "layer3Status": p.data_result.status if p.data_result else "PENDING",
             "differences": differences,
+            "visualResult": {
+                "status": p.visual_result.status,
+                "pixelSimilarityPct": p.visual_result.pixel_similarity_pct,
+                "aiSummary": p.visual_result.ai_summary,
+                "aiKeyDifferences": json.loads(p.visual_result.ai_key_differences) if p.visual_result.ai_key_differences else [],
+                "gpt4oRiskLevel": p.visual_result.gpt4o_risk_level,
+                "tableauAnnotatedPath": get_screenshot_url(p.visual_result.tableau_annotated_path),
+                "powerbiAnnotatedPath": get_screenshot_url(p.visual_result.powerbi_annotated_path),
+                "comparisonImagePath": get_screenshot_url(p.visual_result.comparison_image_path),
+                "diffImagePath": get_screenshot_url(p.visual_result.diff_image_path),
+            } if p.visual_result else None,
             "tableauWorkbook": p.tableau_workbook,
             "powerbiReportName": p.powerbi_report_name,
-            "tableauScreenshot": p.tableau_screenshot,
-            "powerBiScreenshot": p.powerbi_screenshot,
+            "tableauScreenshot": get_screenshot_url(p.tableau_screenshot),
+            "powerBiScreenshot": get_screenshot_url(p.powerbi_screenshot),
             "createdAt": p.created_at.isoformat()
         })
     return output
@@ -270,7 +388,8 @@ async def get_result(run_id: str, db: Session = Depends(get_db)):
     pair = db.query(ReportPair).filter(ReportPair.run_id == run_id).options(
         joinedload(ReportPair.relationship_result).joinedload(RelationshipResult.details),
         joinedload(ReportPair.semantic_result).joinedload(SemanticResult.calc_fields),
-        joinedload(ReportPair.data_result).joinedload(DataResult.table_comparisons)
+        joinedload(ReportPair.data_result).joinedload(DataResult.table_comparisons),
+        joinedload(ReportPair.visual_result)
     ).first()
     
     if not pair:
@@ -278,7 +397,8 @@ async def get_result(run_id: str, db: Session = Depends(get_db)):
         pair = db.query(ReportPair).options(
             joinedload(ReportPair.relationship_result).joinedload(RelationshipResult.details),
             joinedload(ReportPair.semantic_result).joinedload(SemanticResult.calc_fields),
-            joinedload(ReportPair.data_result).joinedload(DataResult.table_comparisons)
+            joinedload(ReportPair.data_result).joinedload(DataResult.table_comparisons),
+            joinedload(ReportPair.visual_result)
         ).get(run_id)
         
     if not pair:
@@ -294,6 +414,25 @@ async def get_result(run_id: str, db: Session = Depends(get_db)):
         },
         "overall_result": pair.overall_status,
         "categories": {
+            "visual": {
+                "result": pair.visual_result.status if pair.visual_result else "PENDING",
+                "metrics": {
+                    "similarity": pair.visual_result.pixel_similarity_pct if pair.visual_result else None,
+                    "gpt4o_called": pair.visual_result.gpt4o_called if pair.visual_result else False,
+                    "risk_level": pair.visual_result.gpt4o_risk_level if pair.visual_result else None,
+                } if pair.visual_result else None,
+                "images": {
+                    "tableau_annotated": get_screenshot_url(pair.visual_result.tableau_annotated_path) if pair.visual_result else None,
+                    "powerbi_annotated": get_screenshot_url(pair.visual_result.powerbi_annotated_path) if pair.visual_result else None,
+                    "comparison": get_screenshot_url(pair.visual_result.comparison_image_path) if pair.visual_result else None,
+                    "diff": get_screenshot_url(pair.visual_result.diff_image_path) if pair.visual_result else None,
+                } if pair.visual_result else None,
+                "ai_analysis": {
+                    "summary": pair.visual_result.ai_summary if pair.visual_result else None,
+                    "key_differences": json.loads(pair.visual_result.ai_key_differences) if pair.visual_result and pair.visual_result.ai_key_differences else [],
+                    "recommendation": pair.visual_result.ai_recommendation if pair.visual_result else None,
+                } if pair.visual_result else None
+            },
             "data": {
                 "result": pair.data_result.status if pair.data_result else "PENDING", 
                 "details": [

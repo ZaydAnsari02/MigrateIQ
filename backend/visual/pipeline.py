@@ -170,6 +170,9 @@ def _build_visual_result(
         diff_image_path      = pixel.diff_image_path,
         compared_width       = pixel.compared_width,
         compared_height      = pixel.compared_height,
+        tableau_annotated_path  = pixel.tableau_annotated_path,
+        powerbi_annotated_path  = pixel.powerbi_annotated_path,
+        comparison_image_path   = pixel.comparison_image_path,
 
         # GPT-4o fields (None when GPT-4o was not called)
         gpt4o_called       = gpt4o_called,

@@ -10,9 +10,11 @@ import { ResultsTable } from "@/components/results/ResultsTable";
 import { RunsTable } from "@/components/dashboard/RunsTable";
 import { ComparisonExplorer } from "@/components/comparison/ComparisonExplorer";
 import { useSidebar, useUpload, useSelection, useAuth } from "@/hooks";
-import { computeStats, cn } from "@/lib/utils";
-import { validationService, type BackendResult } from "@/services/validationService";
-import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, DiffType, ValidationRun } from "@/types";
+import { useExportReport } from "@/hooks/useExportReport";
+import { useNotifications } from "@/context/NotificationsContext";
+import { computeStats } from "@/lib/utils";
+import { validationService } from "@/services/validationService";
+import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, ValidationRun } from "@/types";
 
 // ─── Map backend result → frontend ReportPair ─────────────────────────────────
 //
@@ -31,22 +33,38 @@ function backendResultToReportPair(result: any): ReportPair {
 
     return {
       ...result,
+      overallStatus: (result.overallStatus ?? "PENDING").toUpperCase(),
       reportName: cleanRepoName(result.reportName),
       tableauWorkbook: result.tableauWorkbook?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, ""),
       powerBiReportName: result.powerBiReportName?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "")
     } as ReportPair;
   }
 
-  const toStatus = (s: string): ValidationStatus =>
-    (["PASS", "FAIL", "PENDING", "RUNNING"].includes(s) ? s : "PENDING") as ValidationStatus;
+  const toStatus = (s: string): ValidationStatus => {
+    const upper = (s ?? "").toUpperCase();
+    return (["PASS", "FAIL", "PENDING", "RUNNING", "ERROR", "REVIEW"].includes(upper)
+      ? upper : "PENDING") as ValidationStatus;
+  };
 
   const toLayer = (s: string): LayerStatus =>
-    (["pass", "fail", "pending", "running"].includes(s.toLowerCase())
-      ? s.toLowerCase()
+    (["pass", "fail", "pending", "running", "review", "error", "skipped"].includes((s ?? "").toLowerCase())
+      ? (s ?? "").toLowerCase()
       : "pending") as LayerStatus;
 
-  // Collect differences from all three layers
+  // Collect differences from all layers
   const differences: Difference[] = [];
+
+  // Visual layer (L1)
+  if (result.categories?.visual?.ai_analysis?.key_differences) {
+    result.categories.visual.ai_analysis.key_differences.forEach((diff: string) => {
+      differences.push({
+        type: "Visual Mismatch",
+        detail: diff,
+        severity: result.categories.visual.metrics?.risk_level === "high" ? "high" : "medium",
+        layer: "L1",
+      });
+    });
+  }
 
   // Data layer (L3) - details is an array
   if (result.categories?.data?.details) {
@@ -74,8 +92,8 @@ function backendResultToReportPair(result: any): ReportPair {
     });
   }
 
-  // Relationships layer (L1)
-  if (result.categories?.relationships?.details?.failure_reasons?.length > 0) {
+  // Relationships layer (L1 - Fallback if visual is missing but relationships exist)
+  if (!result.categories?.visual && result.categories?.relationships?.details?.failure_reasons?.length > 0) {
     result.categories.relationships.details.failure_reasons.forEach((reason: string) => {
       differences.push({
         type: "Missing Filter",
@@ -92,31 +110,66 @@ function backendResultToReportPair(result: any): ReportPair {
     return filename.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "");
   };
 
-  const twName = cleanName(result.inputs?.twbx_file || "");
-  const pbName = cleanName(result.inputs?.pbix_file || "");
+  const twName = cleanName(result.inputs?.twbx_file || result.tableauScreenshot || "");
+  const pbName = cleanName(result.inputs?.pbix_file || result.powerBiScreenshot || "");
 
   const finalName = result.reportName
     ? result.reportName.split(" vs ").map(cleanName).join(" vs ")
     : `${twName} vs ${pbName}`;
 
+  // Map visual result to internal type
+  const rawVisual = result.categories?.visual || result.visualResult;
+  let visualResult = undefined;
+
+  if (rawVisual) {
+    visualResult = {
+      status: toLayer(rawVisual.result || rawVisual.status),
+      pixelSimilarityPct: rawVisual.metrics?.similarity ?? rawVisual.pixelSimilarityPct,
+      gpt4oCalled: rawVisual.metrics?.gpt4o_called ?? (rawVisual.gpt4oRiskLevel !== undefined),
+      aiSummary: rawVisual.ai_analysis?.summary || rawVisual.aiSummary,
+      aiKeyDifferences: rawVisual.ai_analysis?.key_differences
+        ? JSON.stringify(rawVisual.ai_analysis.key_differences)
+        : (Array.isArray(rawVisual.aiKeyDifferences)
+          ? JSON.stringify(rawVisual.aiKeyDifferences)
+          : (typeof rawVisual.aiKeyDifferences === 'string' && rawVisual.aiKeyDifferences.trim().startsWith('[')
+            ? rawVisual.aiKeyDifferences
+            : JSON.stringify(rawVisual.aiKeyDifferences ? [rawVisual.aiKeyDifferences] : []))),
+      diffImagePath: rawVisual.images?.diff || rawVisual.diffImagePath,
+      comparisonImagePath: rawVisual.images?.comparison || rawVisual.comparisonImagePath,
+      tableauAnnotatedPath: rawVisual.images?.tableau_annotated || rawVisual.tableauAnnotatedPath,
+      powerbiAnnotatedPath: rawVisual.images?.powerbi_annotated || rawVisual.powerbiAnnotatedPath,
+    };
+  }
+
   return {
-    id: result.comparison_id || result.id,
+    id: result.id || result.comparison_id,
     projectId: "proj-001",
-    runId: result.comparison_id || result.id,
+    runId: result.runId || result.comparison_id || result.id,
     reportName: finalName,
     overallStatus: toStatus(result.overall_result || result.overallStatus),
-    layer1Status: toLayer(result.categories?.relationships?.result || result.layer1Status || "pending"),
+    overallRisk: result.categories?.visual?.metrics?.risk_level || result.visualResult?.gpt4oRiskLevel,
+    layer1Status: result.categories?.visual !== undefined
+      ? toLayer(result.categories.visual.result || result.layer1Status || "pending")
+      : "skipped",
     layer2Status: toLayer(result.categories?.semantic_model?.result || result.layer2Status || "pending"),
     layer3Status: toLayer(result.categories?.data?.result || result.layer3Status || "pending"),
     differences,
-    createdAt: result.timestamp || result.createdAt,
-    updatedAt: result.timestamp || result.updatedAt || result.createdAt,
+    visualResult: visualResult as any,
+    tableauScreenshot: result.tableauScreenshot,
+    powerBiScreenshot: result.powerBiScreenshot,
+    tableauWorkbook: twName,
+    powerBiReportName: pbName,
+    createdAt: result.createdAt || result.timestamp,
+    updatedAt: result.updatedAt || result.createdAt || result.timestamp
   };
 }
 
 function backendRunToValidationRun(run: any): ValidationRun {
-  const toStatus = (s: string): ValidationStatus =>
-    (["PASS", "FAIL", "PENDING", "RUNNING", "ERROR"].includes(s) ? s : "PENDING") as ValidationStatus;
+  const toStatus = (s: string): ValidationStatus => {
+    const upper = (s ?? "").toUpperCase();
+    return (["PASS", "FAIL", "PENDING", "RUNNING", "ERROR", "REVIEW"].includes(upper)
+      ? upper : "PENDING") as ValidationStatus;
+  };
 
   return {
     id: String(run.id),
@@ -132,30 +185,52 @@ function backendRunToValidationRun(run: any): ValidationRun {
   };
 }
 
+// ─── Derive run status from its paired results ────────────────────────────────
+//
+// The backend often leaves run.status as PENDING even after completion.
+// Cross-reference with the report pairs that belong to this run to get the
+// real outcome.
+
+function deriveRunStatus(run: ValidationRun, pairs: ReportPair[]): ValidationRun {
+  // Already a terminal / accurate status — keep it
+  if (run.status === "FAIL" || run.status === "PASS" || run.status === "ERROR") return run;
+
+  // String-coerce both sides — JSON may serialize the FK as int or string
+  let runPairs = pairs.filter(p => p.runId != null && String(p.runId) === String(run.id));
+
+  // Fallback for older rows where run_id was not stored: match by date window.
+  // If a run completed and only one pair was created within that window, use it.
+  if (runPairs.length === 0 && run.completedAt) {
+    const start = new Date(run.startedAt).getTime();
+    const end   = new Date(run.completedAt).getTime() + 5_000; // 5 s buffer
+    const orphans = pairs.filter(p => !p.runId);
+    const inWindow = orphans.filter(p => {
+      const t = new Date(p.createdAt).getTime();
+      return t >= start && t <= end;
+    });
+    if (inWindow.length === 1) runPairs = inWindow;
+  }
+
+  if (runPairs.length === 0) return run;
+
+  const hasError = runPairs.some(p => (p.overallStatus ?? "").toUpperCase() === "ERROR");
+  const hasFail  = runPairs.some(p => (p.overallStatus ?? "").toUpperCase() === "FAIL");
+  const allPass  = runPairs.every(p => (p.overallStatus ?? "").toUpperCase() === "PASS");
+
+  const derived: ValidationStatus = hasError ? "ERROR" : hasFail ? "FAIL" : allPass ? "PASS" : run.status;
+  return { ...run, status: derived };
+}
+
 // ─── Page Title Map ───────────────────────────────────────────────────────────
 
 const PAGE_TITLES: Record<NavItem, { title: string; sub: string }> = {
-  dashboard: { title: "Validation Dashboard", sub: "AI Telekom TD → Fabric · Overview" },
+  dashboard: { title: "Validation Dashboard", sub: "Tableau → PowerBI Validation · Overview" },
   upload: { title: "Upload Reports", sub: "Upload source files to trigger a new validation run" },
   runs: { title: "Validation Runs", sub: "History of all pipeline executions" },
   results: { title: "Validation Results", sub: "Per-report validation outcomes across all three layers" },
   explorer: { title: "Comparison Explorer", sub: "Side-by-side visual and metric comparison" },
-  settings: { title: "Settings", sub: "Project configuration and integration settings" },
 };
 
-// ─── Settings placeholder ─────────────────────────────────────────────────────
-
-function SettingsPage() {
-  return (
-    <div className="bg-white rounded-xl border border-zinc-200 shadow-card p-8 text-center">
-      <div className="text-4xl mb-3">⚙️</div>
-      <h3 className="text-sm font-semibold text-zinc-700 mb-1">Settings</h3>
-      <p className="text-xs text-zinc-400">
-        Project config, Tableau server credentials, and Power BI workspace settings will appear here.
-      </p>
-    </div>
-  );
-}
 
 // ─── Backend status banner ────────────────────────────────────────────────────
 
@@ -194,7 +269,7 @@ export default function DashboardPage() {
   const [uploadPct, setUploadPct] = useState(0);
   const [apiError, setApiError] = useState<string | null>(null);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
-  const [explorerSelections, setExplorerSelections] = useState<{ left?: string, right?: string }>({});
+  const [explorerSelection, setExplorerSelection] = useState<string | undefined>(undefined);
 
   // All real results that have come back from the backend this session
   const [livePairs, setLivePairs] = useState<ReportPair[]>([]);
@@ -203,6 +278,8 @@ export default function DashboardPage() {
   const sidebar = useSidebar(false);
   const upload = useUpload();
   const selection = useSelection<string>();
+  const { addNotification } = useNotifications();
+  const exportReport = useExportReport();
 
   const stats = computeStats(livePairs);
   const page = PAGE_TITLES[activeNav];
@@ -214,7 +291,10 @@ export default function DashboardPage() {
       try {
         const isOnline = await validationService.healthCheck();
         setBackendOnline(isOnline);
-        if (!isOnline) return;
+        if (!isOnline) {
+          addNotification("error", "Backend offline", "Start the FastAPI server and refresh to connect.");
+          return;
+        }
 
         // 1. Load Runs
         const runsData = await validationService.listRuns();
@@ -223,12 +303,17 @@ export default function DashboardPage() {
         // 2. Load all Report Pairs
         const pairsData = await validationService.listReportPairs();
         setLivePairs(pairsData.map(backendResultToReportPair));
+
+        if (pairsData.length > 0) {
+          addNotification("info", "Results loaded", `${pairsData.length} validation result${pairsData.length !== 1 ? "s" : ""} loaded from server.`);
+        }
       } catch (err) {
         console.error("Failed to load initial data:", err);
+        addNotification("error", "Failed to load data", "Could not fetch runs or results from the server.");
       }
     };
     init();
-  }, []);
+  }, [addNotification]);
 
   // ── Start Validation ─────────────────────────────────────────────────────
   //
@@ -240,6 +325,7 @@ export default function DashboardPage() {
     setApiError(null);
     setStartLoading(true);
     setUploadPct(0);
+    addNotification("info", "Validation started", "Uploading files and running the three-layer validation engine…");
 
     try {
       const result = await validationService.startValidation(
@@ -257,16 +343,26 @@ export default function DashboardPage() {
       setLiveRuns(runsData.map(backendRunToValidationRun));
       setLivePairs(pairsData.map(backendResultToReportPair));
 
+      if (pair.overallStatus === "PASS") {
+        addNotification("success", "Validation passed", `"${pair.reportName}" passed all three layers.`);
+      } else if (pair.overallStatus === "FAIL") {
+        addNotification("warning", "Validation completed with failures", `"${pair.reportName}" has ${pair.differences.length} difference${pair.differences.length !== 1 ? "s" : ""} detected.`);
+      } else {
+        addNotification("info", "Validation complete", `"${pair.reportName}" finished with status: ${pair.overallStatus}.`);
+      }
+
       upload.reset();
       setActiveNav("results");
       selection.select(pair.id);
     } catch (err: unknown) {
-      setApiError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setApiError(msg);
+      addNotification("error", "Validation failed", msg);
     } finally {
       setStartLoading(false);
       setUploadPct(0);
     }
-  }, [upload, selection]);
+  }, [upload, selection, addNotification]);
 
   // ── Load a past result by run ID (called from RunsTable "View" action) ───
 
@@ -278,18 +374,21 @@ export default function DashboardPage() {
         const exists = prev.some(p => p.id === pair.id);
         return exists ? prev : [pair, ...prev];
       });
+      addNotification("info", "Run loaded", `Results for "${pair.reportName}" loaded from history.`);
       setActiveNav("results");
       selection.select(pair.id);
     } catch (err: unknown) {
-      setApiError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setApiError(msg);
+      addNotification("error", "Failed to load run", msg);
     }
-  }, [selection]);
+  }, [selection, addNotification]);
 
   // ── Navigate to Explorer with specific reports ───────────────────────────
 
   const handleMoreInfo = useCallback((pair: ReportPair) => {
     // We set this as the 'left' side of comparison, and potentially the same or first pair as 'right'
-    setExplorerSelections({ left: pair.id, right: pair.id });
+    setExplorerSelection(pair.id);
     setActiveNav("explorer");
   }, []);
 
@@ -318,12 +417,6 @@ export default function DashboardPage() {
 
               {activeNav === "dashboard" && (
                 <div className="flex items-center gap-2">
-                  <button className="px-3 py-2 text-xs font-medium text-zinc-600 border border-zinc-200 bg-white rounded-lg hover:bg-zinc-50 transition-colors flex items-center gap-1.5">
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                      <path d="M6 1v6M3.5 4L6 1l2.5 3M1.5 9v1a.5.5 0 00.5.5h8a.5.5 0 00.5-.5V9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                    Export Report
-                  </button>
                   <button
                     onClick={() => setActiveNav("upload")}
                     className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-1.5 shadow-sm shadow-blue-200"
@@ -399,7 +492,10 @@ export default function DashboardPage() {
 
             {/* ── Runs ───────────────────────────────────────────────────── */}
             {activeNav === "runs" && (
-              <RunsTable runs={liveRuns} onSelect={run => handleLoadRun(run.id)} />
+              <RunsTable
+                runs={liveRuns.map(r => deriveRunStatus(r, livePairs))}
+                onSelect={run => handleLoadRun(run.id)}
+              />
             )}
 
             {/* ── Results ────────────────────────────────────────────────── */}
@@ -424,6 +520,10 @@ export default function DashboardPage() {
                       selectedId={selection.selected}
                       onSelect={selection.toggle}
                       onMoreInfo={handleMoreInfo}
+                      onExport={async (pairs) => {
+                        await exportReport(pairs);
+                        addNotification("success", "Report exported", `PDF generated for ${pairs.length} run${pairs.length !== 1 ? "s" : ""}.`);
+                      }}
                     />
                   </div>
                 </div>
@@ -434,13 +534,9 @@ export default function DashboardPage() {
             {activeNav === "explorer" && (
               <ComparisonExplorer
                 pairs={livePairs}
-                initialLeftId={explorerSelections.left}
-                initialRightId={explorerSelections.right}
+                initialLeftId={explorerSelection}
               />
             )}
-
-            {/* ── Settings ───────────────────────────────────────────────── */}
-            {activeNav === "settings" && <SettingsPage />}
 
             {/* Footer */}
             <div className="flex items-center justify-between text-[10px] text-zinc-400 py-4 mt-2">

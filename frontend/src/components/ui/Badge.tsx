@@ -33,6 +33,17 @@ interface LayerDotProps {
 }
 
 export function LayerDot({ status, label, className }: LayerDotProps) {
+  if (status === "skipped") {
+    return (
+      <span
+        className={cn("relative inline-flex items-center gap-1", className)}
+        title="Screenshots not provided"
+      >
+        <span className="text-[10px] text-slate-400 font-bold">—</span>
+        {label && <span className="text-[10px] text-slate-400">N/A</span>}
+      </span>
+    );
+  }
   const c = getStatusColors(status);
   return (
     <span

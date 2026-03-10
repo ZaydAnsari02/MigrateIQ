@@ -265,12 +265,11 @@ export const API_BASE_URL =
 // ─── Navigation ─────────────────────────────────────────────────────────────
 
 export const NAV_ITEMS: { id: NavItem; label: string; group?: string }[] = [
-  { id: "dashboard", label: "Dashboard" },
-  { id: "upload", label: "Upload Reports" },
-  { id: "runs", label: "Validation Runs" },
-  { id: "results", label: "Results" },
-  { id: "explorer", label: "Comparison Explorer" },
-  { id: "settings", label: "Settings" },
+  { id: "dashboard",  label: "Dashboard" },
+  { id: "upload",     label: "Upload Reports" },
+  { id: "runs",       label: "Validation Runs" },
+  { id: "results",    label: "Results" },
+  { id: "explorer",   label: "Comparison Explorer" },
 ];
 
 

@@ -19,6 +19,12 @@ import os
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# Server / Environment settings
+# ---------------------------------------------------------------------------
+BASE_URL: str = os.getenv("BASE_URL", "http://localhost:8000")
+DB_URL:   str = os.getenv("DB_URL", "sqlite:///migrateiq.db")
+
+# ---------------------------------------------------------------------------
 # Optionally load a .env file (silently ignored if python-dotenv is absent)
 # ---------------------------------------------------------------------------
 _ENV_PATH = Path(__file__).parent / ".env"
@@ -39,6 +45,21 @@ OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
 # Anthropic API key — used by the Claude semantic auditor (Layer 2).
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+
+# ---------------------------------------------------------------------------
+# Azure OpenAI (optional — used instead of OpenAI when endpoint is set)
+# ---------------------------------------------------------------------------
+# Azure endpoint, e.g. https://YOUR-RESOURCE.openai.azure.com/
+AZURE_OPENAI_ENDPOINT: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+
+# Azure API key (from Azure AI Foundry → Keys and Endpoint)
+AZURE_OPENAI_API_KEY: str = os.getenv("AZURE_OPENAI_API_KEY", "")
+
+# Name of the GPT-4o deployment you created in Azure AI Foundry
+AZURE_OPENAI_DEPLOYMENT: str = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+
+# Azure OpenAI API version
+AZURE_OPENAI_API_VERSION: str = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
 
 
 # ---------------------------------------------------------------------------

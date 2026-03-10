@@ -1,9 +1,9 @@
 // ─── Enums ────────────────────────────────────────────────────────────────────
 
-export type ValidationStatus = "PASS" | "FAIL" | "PENDING" | "RUNNING" | "ERROR";
-export type LayerStatus      = "pass" | "fail" | "pending" | "running";
-export type DiffSeverity     = "high" | "medium" | "low";
-export type DiffType         = "Metric Mismatch" | "Missing Filter" | "Visual Mismatch" | "DAX Mismatch" | "Data Regression";
+export type ValidationStatus = "PASS" | "FAIL" | "PENDING" | "RUNNING" | "ERROR" | "REVIEW";
+export type LayerStatus = "pass" | "fail" | "pending" | "running" | "review" | "skipped";
+export type DiffSeverity = "high" | "medium" | "low";
+export type DiffType = "Metric Mismatch" | "Missing Filter" | "Visual Mismatch" | "DAX Mismatch" | "Data Regression";
 
 // ─── Core Entities ────────────────────────────────────────────────────────────
 
@@ -48,10 +48,12 @@ export interface ReportPair {
   powerBiScreenshot?: string;
   // Results
   overallStatus: ValidationStatus;
+  overallRisk?: "low" | "medium" | "high";
   layer1Status: LayerStatus;
   layer2Status: LayerStatus;
   layer3Status: LayerStatus;
   differences: Difference[];
+  visualResult?: VisualResult;
   createdAt: string;
   updatedAt: string;
 }
@@ -66,6 +68,9 @@ export interface VisualResult {
   totalPixels?: number;
   hashDistance?: number;
   diffImagePath?: string;
+  comparisonImagePath?: string;
+  tableauAnnotatedPath?: string;
+  powerbiAnnotatedPath?: string;
   comparedWidth?: number;
   comparedHeight?: number;
   gpt4oCalled: boolean;
@@ -170,8 +175,7 @@ export type NavItem =
   | "upload"
   | "runs"
   | "results"
-  | "explorer"
-  | "settings";
+  | "explorer";
 
 export interface DashboardStats {
   totalReports: number;

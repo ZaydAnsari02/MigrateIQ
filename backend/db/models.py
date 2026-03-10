@@ -13,6 +13,24 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 # ---------------------------------------------------------------------------
+# Constants & Enums
+# ---------------------------------------------------------------------------
+
+class Status:
+    PASS    = "pass"
+    FAIL    = "fail"
+    PENDING = "pending"
+    RUNNING = "running"
+    REVIEW  = "review"
+    ERROR   = "error"
+
+class Risk:
+    HIGH   = "high"
+    MEDIUM = "medium"
+    LOW    = "low"
+
+
+# ---------------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------------
 
@@ -157,11 +175,36 @@ class VisualResult(Base):
     id: Mapped[int]             = mapped_column(Integer, primary_key=True, autoincrement=True)
     report_pair_id: Mapped[int] = mapped_column(Integer, ForeignKey("report_pair.id"), nullable=False)
     
-    # Pixel diff / GPT-4o Vision placeholders
+    # Pixel diff metrics
     pixel_similarity_pct: Mapped[Optional[float]] = mapped_column(Float,   nullable=True)
-    ai_summary:          Mapped[Optional[str]]     = mapped_column(Text,    nullable=True)
-    status:             Mapped[str]                = mapped_column(String, nullable=False)
-    created_at:         Mapped[datetime]           = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    pixel_diff_count:     Mapped[Optional[int]]   = mapped_column(Integer, nullable=True)
+    total_pixels:         Mapped[Optional[int]]   = mapped_column(Integer, nullable=True)
+    hash_distance:        Mapped[Optional[int]]   = mapped_column(Integer, nullable=True)
+    diff_image_path:      Mapped[Optional[str]]   = mapped_column(String,  nullable=True)
+    compared_width:       Mapped[Optional[int]]   = mapped_column(Integer, nullable=True)
+    compared_height:      Mapped[Optional[int]]   = mapped_column(Integer, nullable=True)
+    tableau_annotated_path:  Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    powerbi_annotated_path:  Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    comparison_image_path:   Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # GPT-4o Vision fields
+    gpt4o_called:       Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    chart_type_match:   Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    color_scheme_match: Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    layout_match:       Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    axis_labels_match:  Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    legend_match:       Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    title_match:        Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    data_labels_match:  Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    ai_summary:         Mapped[Optional[str]]  = mapped_column(Text,    nullable=True)
+    ai_key_differences: Mapped[Optional[str]]  = mapped_column(Text,    nullable=True) # JSON list
+    ai_recommendation:  Mapped[Optional[str]]  = mapped_column(Text,    nullable=True)
+    ai_raw_response:    Mapped[Optional[str]]  = mapped_column(Text,    nullable=True)
+    gpt4o_risk_level:   Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    
+    status:             Mapped[str]            = mapped_column(String,  nullable=False)
+    pass_threshold_pct: Mapped[Optional[float]] = mapped_column(Float,  nullable=True)
+    created_at:         Mapped[datetime]       = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     # Relationships
     report_pair: Mapped["ReportPair"] = relationship("ReportPair", back_populates="visual_result")
@@ -251,18 +294,80 @@ class TableComparison(Base):
 # ---------------------------------------------------------------------------
 
 def init_db(db_url: str = "sqlite:///migrateiq.db") -> "Engine":
-    """Create all tables and return the engine."""
+    """Create all tables and run lightweight column migrations."""
     from sqlalchemy import create_engine
     engine = create_engine(db_url, echo=False)
     Base.metadata.create_all(engine)
+    _migrate_columns(engine)
     return engine
+
+
+def _migrate_columns(engine) -> None:
+    """Add columns that exist in the model but are missing from the DB.
+
+    SQLite does not support IF NOT EXISTS on ALTER TABLE, so we check via
+    PRAGMA table_info and only issue the statement when the column is absent.
+    """
+    from sqlalchemy import text
+
+    migrations: dict[str, list[tuple[str, str]]] = {
+        "visual_result": [
+            ("pixel_diff_count",       "INTEGER"),
+            ("total_pixels",           "INTEGER"),
+            ("hash_distance",          "INTEGER"),
+            ("diff_image_path",        "TEXT"),
+            ("compared_width",         "INTEGER"),
+            ("compared_height",        "INTEGER"),
+            ("tableau_annotated_path", "TEXT"),
+            ("powerbi_annotated_path", "TEXT"),
+            ("comparison_image_path",  "TEXT"),
+            ("gpt4o_called",           "BOOLEAN"),
+            ("chart_type_match",       "TEXT"),
+            ("color_scheme_match",     "TEXT"),
+            ("layout_match",           "TEXT"),
+            ("axis_labels_match",      "TEXT"),
+            ("legend_match",           "TEXT"),
+            ("title_match",            "TEXT"),
+            ("data_labels_match",      "TEXT"),
+            ("ai_summary",             "TEXT"),
+            ("ai_key_differences",     "TEXT"),
+            ("ai_recommendation",      "TEXT"),
+            ("ai_raw_response",        "TEXT"),
+            ("gpt4o_risk_level",       "TEXT"),
+            ("pass_threshold_pct",     "REAL"),
+        ],
+        "report_pair": [
+            ("run_id", "INTEGER"),
+        ],
+        "validation_run": [
+            ("errored", "INTEGER"),
+        ],
+    }
+
+    with engine.connect() as conn:
+        for table, columns in migrations.items():
+            rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+            existing = {row[1] for row in rows}  # column name is at index 1
+            for col_name, col_type in columns:
+                if col_name not in existing:
+                    conn.execute(text(
+                        f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"
+                    ))
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
 # Persist JSON Result
 # ---------------------------------------------------------------------------
 
-def save_comparison_result(session, result_json: dict, project_id: int, run_id: Optional[int] = None) -> ReportPair:
+def save_comparison_result(
+    session, 
+    result_json: dict, 
+    project_id: int, 
+    run_id: Optional[int] = None,
+    tableau_screenshot: Optional[str] = None,
+    powerbi_screenshot: Optional[str] = None
+) -> ReportPair:
     """
     Persist the full 3-layer JSON result into the normalised schema.
     """
@@ -287,6 +392,8 @@ def save_comparison_result(session, result_json: dict, project_id: int, run_id: 
         report_name    = f"{twName} vs {pbName}",
         tableau_workbook   = twName,
         powerbi_report_name= pbName,
+        tableau_screenshot = tableau_screenshot,
+        powerbi_screenshot = powerbi_screenshot,
         overall_status = result_json.get("overall_result", "PENDING"),
     )
     session.add(pair)
