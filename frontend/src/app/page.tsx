@@ -9,6 +9,7 @@ import { ResultsTable } from "@/components/results/ResultsTable";
 import { RunsTable } from "@/components/dashboard/RunsTable";
 import { ComparisonExplorer } from "@/components/comparison/ComparisonExplorer";
 import { useSidebar, useUpload, useSelection } from "@/hooks";
+import { useExportReport } from "@/hooks/useExportReport";
 import { computeStats, cn } from "@/lib/utils";
 import { MOCK_REPORT_PAIRS } from "@/constants";
 import { validationService, type BackendResult } from "@/services/validationService";
@@ -193,6 +194,7 @@ export default function DashboardPage() {
   const sidebar = useSidebar(false);
   const upload = useUpload();
   const selection = useSelection<string>();
+  const exportReport = useExportReport();
 
   const stats = computeStats(livePairs);
   const page = PAGE_TITLES[activeNav];
@@ -308,12 +310,6 @@ export default function DashboardPage() {
 
               {activeNav === "dashboard" && (
                 <div className="flex items-center gap-2">
-                  <button className="px-3 py-2 text-xs font-medium text-zinc-600 border border-zinc-200 bg-white rounded-lg hover:bg-zinc-50 transition-colors flex items-center gap-1.5">
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                      <path d="M6 1v6M3.5 4L6 1l2.5 3M1.5 9v1a.5.5 0 00.5.5h8a.5.5 0 00.5-.5V9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                    Export Report
-                  </button>
                   <button
                     onClick={() => setActiveNav("upload")}
                     className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-1.5 shadow-sm shadow-blue-200"
@@ -414,6 +410,7 @@ export default function DashboardPage() {
                       selectedId={selection.selected}
                       onSelect={selection.toggle}
                       onMoreInfo={handleMoreInfo}
+                      onExport={exportReport}
                     />
                   </div>
                 </div>
