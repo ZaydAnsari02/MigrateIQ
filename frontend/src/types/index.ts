@@ -170,8 +170,7 @@ export type NavItem =
   | "upload"
   | "runs"
   | "results"
-  | "explorer"
-  | "settings";
+  | "explorer";
 
 export interface DashboardStats {
   totalReports: number;

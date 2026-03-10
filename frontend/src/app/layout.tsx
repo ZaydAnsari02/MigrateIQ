@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { Providers } from "./Providers";
 
 export const metadata: Metadata = {
   title: "MigrateIQ — AI-powered BI Migration Validation",
@@ -14,7 +15,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body><Providers>{children}</Providers></body>
     </html>
   );
 }

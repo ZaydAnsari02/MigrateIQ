@@ -10,6 +10,7 @@ import { RunsTable } from "@/components/dashboard/RunsTable";
 import { ComparisonExplorer } from "@/components/comparison/ComparisonExplorer";
 import { useSidebar, useUpload, useSelection } from "@/hooks";
 import { useExportReport } from "@/hooks/useExportReport";
+import { useNotifications } from "@/context/NotificationsContext";
 import { computeStats, cn } from "@/lib/utils";
 import { MOCK_REPORT_PAIRS } from "@/constants";
 import { validationService, type BackendResult } from "@/services/validationService";
@@ -141,22 +142,8 @@ const PAGE_TITLES: Record<NavItem, { title: string; sub: string }> = {
   runs: { title: "Validation Runs", sub: "History of all pipeline executions" },
   results: { title: "Validation Results", sub: "Per-report validation outcomes across all three layers" },
   explorer: { title: "Comparison Explorer", sub: "Side-by-side visual and metric comparison" },
-  settings: { title: "Settings", sub: "Project configuration and integration settings" },
 };
 
-// ─── Settings placeholder ─────────────────────────────────────────────────────
-
-function SettingsPage() {
-  return (
-    <div className="bg-white rounded-xl border border-zinc-200 shadow-card p-8 text-center">
-      <div className="text-4xl mb-3">⚙️</div>
-      <h3 className="text-sm font-semibold text-zinc-700 mb-1">Settings</h3>
-      <p className="text-xs text-zinc-400">
-        Project config, Tableau server credentials, and Power BI workspace settings will appear here.
-      </p>
-    </div>
-  );
-}
 
 // ─── Backend status banner ────────────────────────────────────────────────────
 
@@ -194,6 +181,7 @@ export default function DashboardPage() {
   const sidebar = useSidebar(false);
   const upload = useUpload();
   const selection = useSelection<string>();
+  const { addNotification } = useNotifications();
   const exportReport = useExportReport();
 
   const stats = computeStats(livePairs);
@@ -206,7 +194,10 @@ export default function DashboardPage() {
       try {
         const isOnline = await validationService.healthCheck();
         setBackendOnline(isOnline);
-        if (!isOnline) return;
+        if (!isOnline) {
+          addNotification("error", "Backend offline", "Start the FastAPI server and refresh to connect.");
+          return;
+        }
 
         // 1. Load Runs
         const runsData = await validationService.listRuns();
@@ -215,12 +206,17 @@ export default function DashboardPage() {
         // 2. Load all Report Pairs
         const pairsData = await validationService.listReportPairs();
         setLivePairs(pairsData.map(backendResultToReportPair));
+
+        if (pairsData.length > 0) {
+          addNotification("info", "Results loaded", `${pairsData.length} validation result${pairsData.length !== 1 ? "s" : ""} loaded from server.`);
+        }
       } catch (err) {
         console.error("Failed to load initial data:", err);
+        addNotification("error", "Failed to load data", "Could not fetch runs or results from the server.");
       }
     };
     init();
-  }, []);
+  }, [addNotification]);
 
   // ── Start Validation ─────────────────────────────────────────────────────
   //
@@ -232,6 +228,7 @@ export default function DashboardPage() {
     setApiError(null);
     setStartLoading(true);
     setUploadPct(0);
+    addNotification("info", "Validation started", "Uploading files and running the three-layer validation engine…");
 
     try {
       const result = await validationService.startValidation(
@@ -249,16 +246,26 @@ export default function DashboardPage() {
       setLiveRuns(runsData.map(backendRunToValidationRun));
       setLivePairs(pairsData.map(backendResultToReportPair));
 
+      if (pair.overallStatus === "PASS") {
+        addNotification("success", "Validation passed", `"${pair.reportName}" passed all three layers.`);
+      } else if (pair.overallStatus === "FAIL") {
+        addNotification("warning", "Validation completed with failures", `"${pair.reportName}" has ${pair.differences.length} difference${pair.differences.length !== 1 ? "s" : ""} detected.`);
+      } else {
+        addNotification("info", "Validation complete", `"${pair.reportName}" finished with status: ${pair.overallStatus}.`);
+      }
+
       upload.reset();
       setActiveNav("results");
       selection.select(pair.id);
     } catch (err: unknown) {
-      setApiError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setApiError(msg);
+      addNotification("error", "Validation failed", msg);
     } finally {
       setStartLoading(false);
       setUploadPct(0);
     }
-  }, [upload, selection]);
+  }, [upload, selection, addNotification]);
 
   // ── Load a past result by run ID (called from RunsTable "View" action) ───
 
@@ -270,12 +277,15 @@ export default function DashboardPage() {
         const exists = prev.some(p => p.id === pair.id);
         return exists ? prev : [pair, ...prev];
       });
+      addNotification("info", "Run loaded", `Results for "${pair.reportName}" loaded from history.`);
       setActiveNav("results");
       selection.select(pair.id);
     } catch (err: unknown) {
-      setApiError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setApiError(msg);
+      addNotification("error", "Failed to load run", msg);
     }
-  }, [selection]);
+  }, [selection, addNotification]);
 
   // ── Navigate to Explorer with specific reports ───────────────────────────
 
@@ -410,7 +420,10 @@ export default function DashboardPage() {
                       selectedId={selection.selected}
                       onSelect={selection.toggle}
                       onMoreInfo={handleMoreInfo}
-                      onExport={exportReport}
+                      onExport={async (pairs) => {
+                        await exportReport(pairs);
+                        addNotification("success", "Report exported", `PDF generated for ${pairs.length} run${pairs.length !== 1 ? "s" : ""}.`);
+                      }}
                     />
                   </div>
                 </div>
@@ -425,9 +438,6 @@ export default function DashboardPage() {
                 initialRightId={explorerSelections.right}
               />
             )}
-
-            {/* ── Settings ───────────────────────────────────────────────── */}
-            {activeNav === "settings" && <SettingsPage />}
 
             {/* Footer */}
             <div className="flex items-center justify-between text-[10px] text-zinc-400 py-4 mt-2">

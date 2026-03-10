@@ -14,7 +14,6 @@ export const NAV_ITEMS: { id: NavItem; label: string; group?: string }[] = [
   { id: "runs",       label: "Validation Runs" },
   { id: "results",    label: "Results" },
   { id: "explorer",   label: "Comparison Explorer" },
-  { id: "settings",   label: "Settings" },
 ];
 
 // ─── Upload Zones ─────────────────────────────────────────────────────────────
