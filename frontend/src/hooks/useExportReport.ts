@@ -115,7 +115,7 @@ export function useExportReport() {
     doc.text(`Generated: ${now}`, W - PAD, y, { align: "right" });
 
     y = 42;
-    doc.text("AI Telekom TD -> Fabric  |  L1 Visual  |  L2 Semantic  |  L3 Data Regression",
+    doc.text("Tableau -> PowerBI Validation  |  L1 Visual  |  L2 Semantic  |  L3 Data Regression",
       W - PAD, y, { align: "right" });
 
     y = 84;

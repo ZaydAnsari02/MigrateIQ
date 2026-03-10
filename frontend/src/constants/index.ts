@@ -57,8 +57,8 @@ export const UPLOAD_ZONES: UploadZoneConfig[] = [
 
 export const MOCK_PROJECT: Project = {
   id: "proj-001",
-  name: "AI Telekom TD → Fabric",
-  clientName: "AI Telekom",
+  name: "Tableau → PowerBI Validation",
+  clientName: "MigrateIQ",
   description: "Teradata-to-Microsoft Fabric comprehensive migration",
   tableauServerUrl: "https://tableau.aitelekom.com",
   powerBiWorkspaceId: "ws-9f3a2b1c",

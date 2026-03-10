@@ -137,7 +137,7 @@ function backendRunToValidationRun(run: any): ValidationRun {
 // ─── Page Title Map ───────────────────────────────────────────────────────────
 
 const PAGE_TITLES: Record<NavItem, { title: string; sub: string }> = {
-  dashboard: { title: "Validation Dashboard", sub: "AI Telekom TD → Fabric · Overview" },
+  dashboard: { title: "Validation Dashboard", sub: "Tableau → PowerBI Validation · Overview" },
   upload: { title: "Upload Reports", sub: "Upload source files to trigger a new validation run" },
   runs: { title: "Validation Runs", sub: "History of all pipeline executions" },
   results: { title: "Validation Results", sub: "Per-report validation outcomes across all three layers" },
@@ -172,7 +172,7 @@ export default function DashboardPage() {
   const [uploadPct, setUploadPct] = useState(0);
   const [apiError, setApiError] = useState<string | null>(null);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
-  const [explorerSelections, setExplorerSelections] = useState<{ left?: string, right?: string }>({});
+  const [explorerSelection, setExplorerSelection] = useState<string | undefined>(undefined);
 
   // All real results that have come back from the backend this session
   const [livePairs, setLivePairs] = useState<ReportPair[]>([]);
@@ -291,7 +291,7 @@ export default function DashboardPage() {
 
   const handleMoreInfo = useCallback((pair: ReportPair) => {
     // We set this as the 'left' side of comparison, and potentially the same or first pair as 'right'
-    setExplorerSelections({ left: pair.id, right: pair.id });
+    setExplorerSelection(pair.id);
     setActiveNav("explorer");
   }, []);
 
@@ -434,8 +434,7 @@ export default function DashboardPage() {
             {activeNav === "explorer" && (
               <ComparisonExplorer
                 pairs={[...livePairs, ...MOCK_REPORT_PAIRS]}
-                initialLeftId={explorerSelections.left}
-                initialRightId={explorerSelections.right}
+                initialLeftId={explorerSelection}
               />
             )}
 
