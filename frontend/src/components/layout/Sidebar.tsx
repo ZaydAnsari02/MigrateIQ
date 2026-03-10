@@ -3,6 +3,8 @@
 import { cn } from "@/lib/utils";
 import { NAV_ITEMS } from "@/constants";
 import type { NavItem } from "@/types";
+import { useAuth } from "@/hooks";
+import { useRouter } from "next/navigation";
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
@@ -56,6 +58,21 @@ interface SidebarProps {
 }
 
 export function Sidebar({ activeNav, onNav, collapsed, onToggle }: SidebarProps) {
+  const { username, logout } = useAuth();
+const router = useRouter();
+
+function handleLogout() {
+  logout();
+  router.replace("/login");
+}
+
+const initials =
+  username
+    ?.split(" ")
+    .map(n => n[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase() || "U";
   return (
     <aside
       className={cn(
@@ -120,17 +137,43 @@ export function Sidebar({ activeNav, onNav, collapsed, onToggle }: SidebarProps)
       <div className={cn("border-t border-zinc-100 p-3", collapsed ? "flex justify-center" : "")}>
         {collapsed ? (
           <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-400 to-indigo-600 flex items-center justify-center text-white text-[10px] font-bold">
-            JM
+            {initials}
           </div>
         ) : (
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2.5 w-full">
             <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-400 to-indigo-600 flex items-center justify-center text-white text-[10px] font-bold shrink-0">
-              JM
+              {initials}
             </div>
+
             <div className="min-w-0">
-              <div className="text-xs font-medium text-zinc-700 truncate">John Mitchell</div>
-              <div className="text-[10px] text-zinc-400 truncate">Data Engineering Lead</div>
+              <div className="text-xs font-medium text-zinc-700 truncate">
+                {username || "User"}
+              </div>
+              <div className="text-[10px] text-zinc-400 truncate">
+                Logged in
+              </div>
             </div>
+           <button
+        onClick={handleLogout}
+        className="text-zinc-400 hover:text-red-600 transition-colors"
+        title="Logout"
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <path
+            d="M6 3H3.5A1.5 1.5 0 002 4.5v7A1.5 1.5 0 003.5 13H6"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+          />
+          <path
+            d="M10 11l3-3-3-3M13 8H6"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button> 
           </div>
         )}
       </div>

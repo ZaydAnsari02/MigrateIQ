@@ -5,18 +5,18 @@ import uuid
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List
-
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from typing import List, Optional
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker, joinedload
-
 from datetime import datetime
 
 # ─── MigrateIQ Modules ────────────────────────────────────────────────────────
 BACKEND_DIR = Path(__file__).parent.resolve()
 sys.path.append(str(BACKEND_DIR))
 
+from auth import USERS
 import config
 from db.models import init_db, save_comparison_result, MigrationProject, ReportPair, ValidationRun
 
@@ -67,24 +67,33 @@ def startup_event():
     db.close()
 
 
+# ─── In-memory session store ──────────────────────────────────────────────────
+# Maps token → username. Resets on server restart (sufficient for development).
+SESSIONS: dict[str, str] = {}
+
+
 # ─── POST /validate ───────────────────────────────────────────────────────────
 @app.post("/validate")
 async def validate_reports(
     twbx: UploadFile = File(...),
     pbix:  UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    x_token: Optional[str] = Header(None),
 ):
     import traceback
+    # Resolve the username from the session token (fall back to "Web UI")
+    triggered_by = SESSIONS.get(x_token, "Web UI") if x_token else "Web UI"
+
     try:
         run_id = str(uuid.uuid4())
         start_time = datetime.utcnow()
-        
+
         project = db.query(MigrationProject).first()
-        
-        # Create an initial ValidationRun
+
+        # Create an initial ValidationRun — record who triggered it
         v_run = ValidationRun(
             project_id=project.id,
-            triggered_by="Web UI",
+            triggered_by=triggered_by,
             status="RUNNING",
             total_reports=1,
             started_at=start_time
@@ -346,3 +355,19 @@ async def list_runs(db: Session = Depends(get_db)):
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "MigrateIQ API"}
+
+
+# ─── POST /login ──────────────────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/login")
+def login(body: LoginRequest):
+    if body.username not in USERS or USERS[body.username] != body.password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = str(uuid.uuid4())
+    SESSIONS[token] = body.username
+    return {"token": token, "username": body.username}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Header } from "@/components/layout/Header";
 import { DashboardOverview } from "@/components/dashboard/DashboardOverview";
@@ -8,9 +9,8 @@ import { UploadSection } from "@/components/upload/UploadSection";
 import { ResultsTable } from "@/components/results/ResultsTable";
 import { RunsTable } from "@/components/dashboard/RunsTable";
 import { ComparisonExplorer } from "@/components/comparison/ComparisonExplorer";
-import { useSidebar, useUpload, useSelection } from "@/hooks";
+import { useSidebar, useUpload, useSelection, useAuth } from "@/hooks";
 import { computeStats, cn } from "@/lib/utils";
-import { MOCK_REPORT_PAIRS } from "@/constants";
 import { validationService, type BackendResult } from "@/services/validationService";
 import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, DiffType, ValidationRun } from "@/types";
 
@@ -33,7 +33,7 @@ function backendResultToReportPair(result: any): ReportPair {
       ...result,
       reportName: cleanRepoName(result.reportName),
       tableauWorkbook: result.tableauWorkbook?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, ""),
-      powerbiReportName: result.powerbiReportName?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "")
+      powerBiReportName: result.powerBiReportName?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "")
     } as ReportPair;
   }
 
@@ -179,6 +179,16 @@ function BackendBanner({ online }: { online: boolean | null }) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
+  const router = useRouter();
+  const { isAuthenticated, initialized } = useAuth();
+
+  // Wait until localStorage has been read before deciding to redirect.
+  // Without `initialized`, token starts as null and the effect fires before
+  // the stored value is available — causing a redirect loop / flicker.
+  useEffect(() => {
+    if (initialized && !isAuthenticated) router.replace("/login");
+  }, [initialized, isAuthenticated, router]);
+
   const [activeNav, setActiveNav] = useState<NavItem>("dashboard");
   const [startLoading, setStartLoading] = useState(false);
   const [uploadPct, setUploadPct] = useState(0);
@@ -423,7 +433,7 @@ export default function DashboardPage() {
             {/* ── Explorer ───────────────────────────────────────────────── */}
             {activeNav === "explorer" && (
               <ComparisonExplorer
-                pairs={[...livePairs, ...MOCK_REPORT_PAIRS]}
+                pairs={livePairs}
                 initialLeftId={explorerSelections.left}
                 initialRightId={explorerSelections.right}
               />
