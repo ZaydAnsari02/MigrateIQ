@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import type { UploadedFiles } from "@/types";
 import { formatBytes } from "@/lib/utils";
 
@@ -49,6 +49,41 @@ export function useSelection<T = string>() {
   const deselect = useCallback(() => setSelected(null), []);
   const toggle = useCallback((id: T) => setSelected(prev => prev === id ? null : id), []);
   return { selected, select, deselect, toggle };
+}
+
+// ─── useAuth ──────────────────────────────────────────────────────────────────
+
+const TOKEN_KEY = "migrateiq_token";
+const USER_KEY  = "migrateiq_user";
+
+export function useAuth() {
+  const [token, setToken]           = useState<string | null>(null);
+  const [username, setUsername]     = useState<string | null>(null);
+  // `initialized` becomes true once we've read localStorage — guards must
+  // wait for this before redirecting, otherwise they act on the null default.
+  const [initialized, setInitialized] = useState(false);
+
+  useEffect(() => {
+    setToken(localStorage.getItem(TOKEN_KEY));
+    setUsername(localStorage.getItem(USER_KEY));
+    setInitialized(true);
+  }, []);
+
+  const login = useCallback((t: string, u: string) => {
+    localStorage.setItem(TOKEN_KEY, t);
+    localStorage.setItem(USER_KEY, u);
+    setToken(t);
+    setUsername(u);
+  }, []);
+
+  const logout = useCallback(() => {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+    setToken(null);
+    setUsername(null);
+  }, []);
+
+  return { token, username, login, logout, isAuthenticated: !!token, initialized };
 }
 
 // ─── useAsync ─────────────────────────────────────────────────────────────────

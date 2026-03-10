@@ -19,6 +19,16 @@ const api = axios.create({
   timeout: 120_000,          // 2 min — parsing large files can be slow
 });
 
+// Attach the session token on every request so the backend can record
+// which user triggered each validation run.
+api.interceptors.request.use((config) => {
+  if (typeof window !== "undefined") {
+    const token = localStorage.getItem("migrateiq_token");
+    if (token) config.headers["x-token"] = token;
+  }
+  return config;
+});
+
 // ─── Types returned by the FastAPI backend ────────────────────────────────────
 // These mirror the JSON structure produced by output/result_builder.py
 
