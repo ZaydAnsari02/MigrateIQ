@@ -73,7 +73,10 @@ def test_pixel_diff() -> dict:
     print(f"  Perceptual hash dist : {result.hash_distance} / 64")
     print(f"  Status               : {result.status.upper()}")
     print(f"  GPT-4o needed?       : {'YES' if result.should_call_gpt4o else 'NO'}")
-    print(f"  Diff image saved to  : {result.diff_image_path}")
+    print(f"  Diff image           : {result.diff_image_path}")
+    print(f"  Tableau annotated    : {result.tableau_annotated_path}")
+    print(f"  Power BI annotated   : {result.powerbi_annotated_path}")
+    print(f"  Side-by-side         : {result.comparison_image_path}")
     print(f"\n  Thresholds used:")
     print(f"    PASS   if similarity >= {PASS_THRESHOLD}%")
     print(f"    REVIEW if similarity >= {REVIEW_THRESHOLD}%")
@@ -81,13 +84,16 @@ def test_pixel_diff() -> dict:
     print(f"    GPT-4o called when similarity < {GPT4O_CALL_THRESHOLD}%")
 
     return {
-        "similarity_pct"   : result.similarity_pct,
-        "diff_pixel_count" : result.diff_pixel_count,
-        "total_pixels"     : result.total_pixels,
-        "hash_distance"    : result.hash_distance,
-        "status"           : result.status,
-        "should_call_gpt4o": result.should_call_gpt4o,
-        "diff_image_path"  : result.diff_image_path,
+        "similarity_pct"        : result.similarity_pct,
+        "diff_pixel_count"      : result.diff_pixel_count,
+        "total_pixels"          : result.total_pixels,
+        "hash_distance"         : result.hash_distance,
+        "status"                : result.status,
+        "should_call_gpt4o"     : result.should_call_gpt4o,
+        "diff_image_path"       : result.diff_image_path,
+        "tableau_annotated_path": result.tableau_annotated_path,
+        "powerbi_annotated_path": result.powerbi_annotated_path,
+        "comparison_image_path" : result.comparison_image_path,
     }
 
 
@@ -104,14 +110,23 @@ def test_gpt4o_vision(force_call: bool = False) -> dict:
     print("  LAYER 1b — GPT-4o VISION ANALYSIS")
     print("=" * 60)
 
-    if not config.OPENAI_API_KEY:
-        print("  ERROR: OPENAI_API_KEY is not set in backend/.env or environment.")
-        return {"error": "OPENAI_API_KEY not configured"}
+    use_azure = bool(config.AZURE_OPENAI_ENDPOINT)
+    active_key = config.AZURE_OPENAI_API_KEY if use_azure else config.OPENAI_API_KEY
+    if not active_key:
+        print("  ERROR: No API key configured. Set OPENAI_API_KEY or AZURE_OPENAI_API_KEY in backend/.env")
+        return {"error": "API key not configured"}
 
-    print(f"  Model         : {config.GPT4O_MODEL}")
+    if use_azure:
+        print(f"  Provider      : Azure OpenAI")
+        print(f"  Endpoint      : {config.AZURE_OPENAI_ENDPOINT}")
+        print(f"  Deployment    : {config.AZURE_OPENAI_DEPLOYMENT}")
+        print(f"  API version   : {config.AZURE_OPENAI_API_VERSION}")
+    else:
+        print(f"  Provider      : OpenAI")
+        print(f"  Model         : {config.GPT4O_MODEL}")
     print(f"  Max tokens    : {config.GPT4O_MAX_TOKENS}")
     print(f"  Temperature   : {config.GPT4O_TEMPERATURE}")
-    print(f"  API key       : {'*' * 8}{config.OPENAI_API_KEY[-4:]}  (last 4 chars)")
+    print(f"  API key       : {'*' * 8}{active_key[-4:]}  (last 4 chars)")
     print("  Calling API   ...")
 
     result = analyze_with_gpt4o(
@@ -202,6 +217,73 @@ def main() -> None:
     # Test 2 — GPT-4o (always forced in this test script so you can verify the API)
     gpt4o_result = test_gpt4o_vision(force_call=True)
     output["gpt4o_vision"] = gpt4o_result
+
+    # ── Spatial GPT-4o annotation ─────────────────────────────────────────────
+    # Ask GPT-4o to return precise bounding-box coordinates for each difference,
+    # ignoring browser/app chrome. Then draw ellipses directly from those coords.
+    print("\n" + "=" * 60)
+    print("  SPATIAL GPT-4o ANNOTATION")
+    print("=" * 60)
+    print("  Asking GPT-4o for exact bounding boxes of each difference…")
+
+    from visual.gpt4o_analyzer import analyze_with_spatial_diff
+    from visual.pixel_diff import build_gpt4o_annotated_images, _load_normalised
+
+    spatial = analyze_with_spatial_diff(
+        tableau_path = TABLEAU_PATH,
+        powerbi_path = POWERBI_PATH,
+        max_retries  = 2,
+        timeout      = 90,
+    )
+
+    print(f"  is_error_fallback : {spatial.is_error_fallback}")
+    print(f"  Risk level        : {spatial.risk_level.upper()}")
+    print(f"  Differences found : {len(spatial.differences)}")
+    for i, d in enumerate(spatial.differences, 1):
+        tab_box = f"({d.tableau_box.x1:.2f},{d.tableau_box.y1:.2f})-({d.tableau_box.x2:.2f},{d.tableau_box.y2:.2f})" if d.tableau_box else "absent"
+        pbi_box = f"({d.powerbi_box.x1:.2f},{d.powerbi_box.y1:.2f})-({d.powerbi_box.x2:.2f},{d.powerbi_box.y2:.2f})" if d.powerbi_box else "absent"
+        print(f"  {i}. {d.label}")
+        print(f"     Tableau  box: {tab_box}")
+        print(f"     Power BI box: {pbi_box}")
+
+    tab_gpt_path  = str(Path(DIFF_OUT_DIR) / "test_report_tableau_gpt4o.png")
+    pbi_gpt_path  = str(Path(DIFF_OUT_DIR) / "test_report_powerbi_gpt4o.png")
+    comp_gpt_path = str(Path(DIFF_OUT_DIR) / "test_report_comparison_gpt4o.png")
+
+    if not spatial.is_error_fallback and spatial.differences:
+        arr_t = _load_normalised(TABLEAU_PATH)
+        arr_p = _load_normalised(POWERBI_PATH)
+        build_gpt4o_annotated_images(
+            arr_t, arr_p, spatial,
+            tab_gpt_path, pbi_gpt_path,
+            comp_out_path  = comp_gpt_path,
+            similarity_pct = pixel_result["similarity_pct"],
+        )
+        print(f"\n  Tableau  (spatial ellipses): {tab_gpt_path}")
+        print(f"  Power BI (spatial ellipses): {pbi_gpt_path}")
+        print(f"  Comparison (spatial):        {comp_gpt_path}")
+
+    spatial_diffs_out = [
+        {
+            "label":       d.label,
+            "tableau_box": {"x1": d.tableau_box.x1, "y1": d.tableau_box.y1,
+                            "x2": d.tableau_box.x2, "y2": d.tableau_box.y2}
+                           if d.tableau_box else None,
+            "powerbi_box": {"x1": d.powerbi_box.x1, "y1": d.powerbi_box.y1,
+                            "x2": d.powerbi_box.x2, "y2": d.powerbi_box.y2}
+                           if d.powerbi_box else None,
+        }
+        for d in spatial.differences
+    ]
+    output["spatial_annotation"] = {
+        "risk_level":       spatial.risk_level,
+        "is_error":         spatial.is_error_fallback,
+        "differences":      spatial_diffs_out,
+        "summary":          spatial.summary,
+        "tableau_path":     tab_gpt_path,
+        "powerbi_path":     pbi_gpt_path,
+        "comparison_path":  comp_gpt_path,
+    }
 
     # Derive overall pipeline decision
     similarity = pixel_result["similarity_pct"]

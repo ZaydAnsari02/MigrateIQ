@@ -5,6 +5,10 @@
  * The PDF combines:
  *   - Section 1: Results summary (stats + layer-status table for all runs)
  *   - Section 2: Detailed comparison per report (mirrors Comparison Explorer)
+ *     • AI narrative summary + similarity %
+ *     • Key visual differences list
+ *     • Comparison image / annotated screenshots (fetched from backend)
+ *     • Regression log (differences)
  */
 
 import { useCallback } from "react";
@@ -24,6 +28,8 @@ const STATUS_COLORS: Record<string, [number, number, number]> = {
   fail:    [239, 68,  68],
   pending: [161, 161, 170],
   running: [59,  130, 246],
+  review:  [245, 158, 11],
+  error:   [249, 115, 22],
 };
 
 const BRAND_BLUE: [number, number, number] = [37,  99,  235];
@@ -35,6 +41,36 @@ const RED_BG:     [number, number, number] = [254, 242, 242];
 const RED_BORDER: [number, number, number] = [252, 165, 165];
 const RED_TEXT:   [number, number, number] = [185, 28,  28];
 const BLUE_LIGHT: [number, number, number] = [232, 240, 254];
+const GREEN_BG:   [number, number, number] = [240, 253, 244];
+const AMBER_BG:   [number, number, number] = [255, 251, 235];
+
+// ─── Image helper ────────────────────────────────────────────────────────────
+
+function resolveUrl(path: string | undefined | null): string | null {
+  if (!path) return null;
+  if (path.startsWith("http")) return path;
+  const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  return `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+}
+
+async function fetchBase64(url: string): Promise<{ dataUrl: string; format: "PNG" | "JPEG" } | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    const format: "PNG" | "JPEG" = blob.type.includes("png") ? "PNG" : "JPEG";
+    return new Promise(resolve => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve({ dataUrl: reader.result as string, format });
+      reader.onerror   = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return null;
+  }
+}
+
+// ─── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useExportReport() {
   return useCallback(async (pairs: ReportPair[]) => {
@@ -196,12 +232,10 @@ export function useExportReport() {
         doc.rect(PAD, y, W - PAD * 2, ROW_H, "F");
         const rY = y + 16;
 
-        // Name — truncated to fit column width
         const shortName = pair.reportName.length > 26 ? pair.reportName.slice(0, 24) + "..." : pair.reportName;
         setFont(8, DARK);
         doc.text(shortName, COL.name.x + 4, rY);
 
-        // Timestamp
         const ts = new Date(pair.createdAt).toLocaleString("en-GB", {
           day: "2-digit", month: "short", year: "numeric",
           hour: "2-digit", minute: "2-digit",
@@ -238,36 +272,33 @@ export function useExportReport() {
       y = 56;
 
       for (const pair of pairs) {
+        const vis = pair.visualResult;
+
         // ── Pair header card ────────────────────────────────────────────────
         const BADGE_W  = 50;
         const NAME_MAX = W - PAD * 2 - BADGE_W - 24;
 
-        // Wrap report name
         const nameLines: string[] = doc.splitTextToSize(pair.reportName, NAME_MAX) as string[];
         const headerH = Math.max(36, 12 + nameLines.length * 13 + 14);
 
-        checkPage(headerH + 100); // ensure enough room for header + layers
+        checkPage(headerH + 100);
 
-        // Card background
         doc.setFillColor(250, 250, 250);
         doc.roundedRect(PAD, y, W - PAD * 2, headerH, 5, 5, "F");
         doc.setDrawColor(228, 228, 231);
         doc.setLineWidth(0.5);
         doc.roundedRect(PAD, y, W - PAD * 2, headerH, 5, 5, "S");
 
-        // Coloured left accent
         const accentCol = STATUS_COLORS[pair.overallStatus.toLowerCase()] ?? MID;
         doc.setFillColor(...accentCol);
         doc.roundedRect(PAD, y, 4, headerH, 2, 2, "F");
 
-        // Report name (multi-line)
         const nameStartY = y + 14;
         nameLines.forEach((line, li) => {
           setFont(10, DARK, "bold");
           doc.text(line, PAD + 12, nameStartY + li * 13);
         });
 
-        // Timestamp subtitle
         const subtitleY = nameStartY + nameLines.length * 13 + 1;
         const fmtDate = new Date(pair.createdAt).toLocaleString("en-GB", {
           day: "2-digit", month: "short", year: "numeric",
@@ -276,9 +307,7 @@ export function useExportReport() {
         setFont(8, MID);
         doc.text(fmtDate, PAD + 12, subtitleY);
 
-        // Overall badge — vertically centred
         badge(pair.overallStatus, W - PAD - BADGE_W - 4, y + headerH / 2 - 2, BADGE_W);
-
         y += headerH + 10;
 
         // ── Validation Layers ──────────────────────────────────────────────
@@ -299,55 +328,195 @@ export function useExportReport() {
           doc.setDrawColor(240, 240, 242);
           doc.setLineWidth(0.3);
           doc.line(PAD, y + 20, W - PAD, y + 20);
-
           setFont(8.5, DARK);
           doc.text(l.label, PAD + 8, y + 13);
           badge(l.status, W - PAD - 52, y + 13, 48);
-
           y += 20;
         });
 
-        y += 10;
+        y += 12;
+
+        // ── Visual Analysis ────────────────────────────────────────────────
+        if (vis) {
+          checkPage(24);
+          setFont(7.5, MID, "bold");
+          doc.text("VISUAL ANALYSIS", PAD, y);
+          y += 10;
+
+          // Similarity bar
+          if (vis.pixelSimilarityPct !== undefined && vis.pixelSimilarityPct !== null) {
+            checkPage(28);
+            const simPct   = Math.max(0, Math.min(100, vis.pixelSimilarityPct));
+            const barW     = W - PAD * 2;
+            const filledW  = barW * (simPct / 100);
+            const barColor: [number,number,number] = simPct >= 95 ? [34, 197, 94] : simPct >= 75 ? [245, 158, 11] : [239, 68, 68];
+
+            // Label row
+            setFont(8, DARK);
+            doc.text("Pixel Similarity", PAD, y);
+            setFont(8, barColor, "bold");
+            doc.text(`${simPct.toFixed(1)}%`, W - PAD, y, { align: "right" });
+            y += 6;
+
+            // Track
+            doc.setFillColor(...LIGHT);
+            doc.roundedRect(PAD, y, barW, 7, 3, 3, "F");
+            // Fill
+            doc.setFillColor(...barColor);
+            doc.roundedRect(PAD, y, filledW, 7, 3, 3, "F");
+            y += 16;
+          }
+
+          // AI summary
+          if (vis.aiSummary) {
+            const summaryLines: string[] = doc.splitTextToSize(`"${vis.aiSummary}"`, W - PAD * 2 - 24) as string[];
+            const summaryH = summaryLines.length * 11 + 26;
+            checkPage(summaryH + 8);
+
+            const summaryBg: [number,number,number] = [238, 244, 255];
+            doc.setFillColor(...summaryBg);
+            doc.roundedRect(PAD, y, W - PAD * 2, summaryH, 5, 5, "F");
+            doc.setDrawColor(...BLUE_LIGHT);
+            doc.setLineWidth(0.4);
+            doc.roundedRect(PAD, y, W - PAD * 2, summaryH, 5, 5, "S");
+
+            // Left accent
+            doc.setFillColor(...BRAND_BLUE);
+            doc.rect(PAD, y + 4, 3, summaryH - 8, "F");
+
+            setFont(7.5, BRAND_BLUE, "bold");
+            doc.text("AI NARRATIVE SUMMARY", PAD + 10, y + 12);
+
+            setFont(8, [60, 80, 130]);
+            summaryLines.forEach((line, li) => {
+              doc.text(line, PAD + 10, y + 22 + li * 11);
+            });
+
+            y += summaryH + 8;
+          }
+
+          // Key visual differences
+          let keyDiffs: string[] = [];
+          if (vis.aiKeyDifferences) {
+            try {
+              const parsed = JSON.parse(vis.aiKeyDifferences);
+              keyDiffs = Array.isArray(parsed) ? parsed.map(String) : [String(parsed)];
+            } catch {
+              keyDiffs = [vis.aiKeyDifferences];
+            }
+          }
+
+          if (keyDiffs.length > 0) {
+            checkPage(24 + keyDiffs.length * 16);
+            setFont(7.5, MID, "bold");
+            doc.text("KEY VISUAL DIFFERENCES", PAD, y);
+            y += 10;
+
+            keyDiffs.forEach(diff => {
+              const diffLines: string[] = doc.splitTextToSize(diff, W - PAD * 2 - 20) as string[];
+              const itemH = diffLines.length * 10 + 12;
+              checkPage(itemH + 2);
+
+              doc.setFillColor(...AMBER_BG);
+              doc.roundedRect(PAD, y, W - PAD * 2, itemH, 3, 3, "F");
+              doc.setFillColor(245, 158, 11);
+              doc.circle(PAD + 10, y + itemH / 2, 2, "F");
+              setFont(8, [120, 80, 20]);
+              diffLines.forEach((line, li) => {
+                doc.text(line, PAD + 18, y + 9 + li * 10);
+              });
+              y += itemH + 3;
+            });
+            y += 4;
+          }
+
+          // Comparison image (full report card)
+          const compUrl  = resolveUrl(vis.comparisonImagePath);
+          const tabUrl   = resolveUrl(vis.tableauAnnotatedPath) || resolveUrl(pair.tableauScreenshot);
+          const pbiUrl   = resolveUrl(vis.powerbiAnnotatedPath) || resolveUrl(pair.powerBiScreenshot);
+
+          if (compUrl) {
+            const img = await fetchBase64(compUrl);
+            if (img) {
+              // Full-width comparison report card
+              const imgW = W - PAD * 2;
+              const imgH = imgW * (960 / 1280); // comparison image is 1280×960
+
+              checkPage(imgH + 30);
+              setFont(7.5, MID, "bold");
+              doc.text("COMPARISON REPORT CARD", PAD, y);
+              y += 8;
+
+              doc.addImage(img.dataUrl, img.format, PAD, y, imgW, imgH);
+              y += imgH + 12;
+            }
+          } else if (tabUrl || pbiUrl) {
+            // Side-by-side annotated screenshots
+            const halfW = (W - PAD * 2 - 8) / 2;
+            const halfH = halfW * (960 / 1280);
+
+            checkPage(halfH + 36);
+            setFont(7.5, MID, "bold");
+            doc.text("ANNOTATED SCREENSHOTS", PAD, y);
+            y += 8;
+
+            if (tabUrl) {
+              const img = await fetchBase64(tabUrl);
+              if (img) {
+                setFont(7, MID);
+                doc.text("Tableau Source", PAD, y);
+                doc.addImage(img.dataUrl, img.format, PAD, y + 6, halfW, halfH);
+              }
+            }
+            if (pbiUrl) {
+              const img = await fetchBase64(pbiUrl);
+              if (img) {
+                setFont(7, MID);
+                doc.text("Power BI Migration", PAD + halfW + 8, y);
+                doc.addImage(img.dataUrl, img.format, PAD + halfW + 8, y + 6, halfW, halfH);
+              }
+            }
+            y += halfH + 20;
+          }
+
+          y += 4;
+        }
 
         // ── Differences ────────────────────────────────────────────────────
         setFont(7.5, MID, "bold");
-        doc.text(`DIFFERENCES  (${pair.differences.length})`, PAD, y);
+        doc.text(`REGRESSION LOG  (${pair.differences.length})`, PAD, y);
         y += 8;
 
         if (pair.differences.length === 0) {
           checkPage(24);
-          doc.setFillColor(248, 250, 252);
+          doc.setFillColor(...GREEN_BG);
           doc.roundedRect(PAD, y, W - PAD * 2, 22, 4, 4, "F");
-          setFont(8.5, MID);
-          doc.text("None detected", PAD + 10, y + 14);
+          setFont(8.5, [21, 128, 61]);
+          doc.text("All checks passed — no regressions detected", PAD + 10, y + 14);
           y += 22;
         } else {
           pair.differences.forEach(d => {
             const DETAIL_MAX  = W - PAD * 2 - 44;
             const detailLines: string[] = doc.splitTextToSize(d.detail, DETAIL_MAX) as string[];
-            const diffH = 14 + 14 + detailLines.length * 10 + 8; // top pad + type row + detail lines + bottom pad
+            const diffH = 14 + 14 + detailLines.length * 10 + 8;
 
             checkPage(diffH + 4);
 
-            // Card
             doc.setFillColor(...RED_BG);
             doc.roundedRect(PAD, y, W - PAD * 2, diffH, 4, 4, "F");
             doc.setDrawColor(...RED_BORDER);
             doc.setLineWidth(0.3);
             doc.roundedRect(PAD, y, W - PAD * 2, diffH, 4, 4, "S");
 
-            // Layer tag pill
             const tagCol = STATUS_COLORS["fail"];
             doc.setFillColor(...tagCol);
             doc.roundedRect(PAD + 6, y + 10, 22, 12, 3, 3, "F");
             setFont(6.5, WHITE, "bold");
             doc.text(d.layer ?? "", PAD + 17, y + 18, { align: "center" });
 
-            // Type
             setFont(8.5, RED_TEXT, "bold");
             doc.text(d.type, PAD + 34, y + 18);
 
-            // Detail — all wrapped lines
             setFont(8, [100, 100, 110]);
             detailLines.forEach((line, li) => {
               doc.text(line, PAD + 34, y + 30 + li * 10);

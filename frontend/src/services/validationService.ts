@@ -60,6 +60,25 @@ export interface BackendResult {
         failure_reasons: string[];
       };
     };
+    visual?: {
+      result: "PASS" | "FAIL" | "REVIEW" | "PENDING";
+      metrics?: {
+        similarity: number | null;
+        gpt4o_called: boolean;
+        risk_level: string | null;
+      };
+      images?: {
+        tableau_annotated: string | null;
+        powerbi_annotated: string | null;
+        comparison: string | null;
+        diff: string | null;
+      };
+      ai_analysis?: {
+        summary: string | null;
+        key_differences: string[];
+        recommendation: string | null;
+      };
+    };
   };
   summary: {
     total_failures: number;
@@ -120,10 +139,10 @@ export const validationService = {
     form.append("twbx", files.twb);
     form.append("pbix", files.pbix);
 
-    // Note: screenshot uploads are not yet wired into compare_reports.py.
-    // Attach them so the backend can be extended without a frontend change.
-    if (files.tableauScreenshots) form.append("tableau_screenshots", files.tableauScreenshots);
-    if (files.pbiScreenshots) form.append("pbi_screenshots", files.pbiScreenshots);
+    // Attach screenshots if provided.
+    // The backend handles both single images and .zip files.
+    if (files.tableauScreenshots) form.append("tableau_screenshot", files.tableauScreenshots);
+    if (files.pbiScreenshots) form.append("pbi_screenshot", files.pbiScreenshots);
 
     try {
       const { data } = await api.post<BackendResult>("/validate", form, {

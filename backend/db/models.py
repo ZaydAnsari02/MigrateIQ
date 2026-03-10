@@ -13,6 +13,24 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 # ---------------------------------------------------------------------------
+# Constants & Enums
+# ---------------------------------------------------------------------------
+
+class Status:
+    PASS    = "pass"
+    FAIL    = "fail"
+    PENDING = "pending"
+    RUNNING = "running"
+    REVIEW  = "review"
+    ERROR   = "error"
+
+class Risk:
+    HIGH   = "high"
+    MEDIUM = "medium"
+    LOW    = "low"
+
+
+# ---------------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------------
 
@@ -157,11 +175,36 @@ class VisualResult(Base):
     id: Mapped[int]             = mapped_column(Integer, primary_key=True, autoincrement=True)
     report_pair_id: Mapped[int] = mapped_column(Integer, ForeignKey("report_pair.id"), nullable=False)
     
-    # Pixel diff / GPT-4o Vision placeholders
+    # Pixel diff metrics
     pixel_similarity_pct: Mapped[Optional[float]] = mapped_column(Float,   nullable=True)
-    ai_summary:          Mapped[Optional[str]]     = mapped_column(Text,    nullable=True)
-    status:             Mapped[str]                = mapped_column(String, nullable=False)
-    created_at:         Mapped[datetime]           = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    pixel_diff_count:     Mapped[Optional[int]]   = mapped_column(Integer, nullable=True)
+    total_pixels:         Mapped[Optional[int]]   = mapped_column(Integer, nullable=True)
+    hash_distance:        Mapped[Optional[int]]   = mapped_column(Integer, nullable=True)
+    diff_image_path:      Mapped[Optional[str]]   = mapped_column(String,  nullable=True)
+    compared_width:       Mapped[Optional[int]]   = mapped_column(Integer, nullable=True)
+    compared_height:      Mapped[Optional[int]]   = mapped_column(Integer, nullable=True)
+    tableau_annotated_path:  Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    powerbi_annotated_path:  Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    comparison_image_path:   Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # GPT-4o Vision fields
+    gpt4o_called:       Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    chart_type_match:   Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    color_scheme_match: Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    layout_match:       Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    axis_labels_match:  Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    legend_match:       Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    title_match:        Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    data_labels_match:  Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    ai_summary:         Mapped[Optional[str]]  = mapped_column(Text,    nullable=True)
+    ai_key_differences: Mapped[Optional[str]]  = mapped_column(Text,    nullable=True) # JSON list
+    ai_recommendation:  Mapped[Optional[str]]  = mapped_column(Text,    nullable=True)
+    ai_raw_response:    Mapped[Optional[str]]  = mapped_column(Text,    nullable=True)
+    gpt4o_risk_level:   Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    
+    status:             Mapped[str]            = mapped_column(String,  nullable=False)
+    pass_threshold_pct: Mapped[Optional[float]] = mapped_column(Float,  nullable=True)
+    created_at:         Mapped[datetime]       = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     # Relationships
     report_pair: Mapped["ReportPair"] = relationship("ReportPair", back_populates="visual_result")
@@ -262,7 +305,14 @@ def init_db(db_url: str = "sqlite:///migrateiq.db") -> "Engine":
 # Persist JSON Result
 # ---------------------------------------------------------------------------
 
-def save_comparison_result(session, result_json: dict, project_id: int, run_id: Optional[int] = None) -> ReportPair:
+def save_comparison_result(
+    session, 
+    result_json: dict, 
+    project_id: int, 
+    run_id: Optional[int] = None,
+    tableau_screenshot: Optional[str] = None,
+    powerbi_screenshot: Optional[str] = None
+) -> ReportPair:
     """
     Persist the full 3-layer JSON result into the normalised schema.
     """
@@ -287,6 +337,8 @@ def save_comparison_result(session, result_json: dict, project_id: int, run_id: 
         report_name    = f"{twName} vs {pbName}",
         tableau_workbook   = twName,
         powerbi_report_name= pbName,
+        tableau_screenshot = tableau_screenshot,
+        powerbi_screenshot = powerbi_screenshot,
         overall_status = result_json.get("overall_result", "PENDING"),
     )
     session.add(pair)

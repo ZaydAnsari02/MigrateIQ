@@ -1,6 +1,6 @@
 "use client";
 
-import { cn, formatDate, formatDuration } from "@/lib/utils";
+import { formatDate, formatDuration } from "@/lib/utils";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { RunStatusChip } from "@/components/ui/Badge";
 import type { ValidationRun } from "@/types";
@@ -23,7 +23,7 @@ export function RunsTable({ runs, onSelect }: RunsTableProps) {
         <table className="w-full">
           <thead>
             <tr className="bg-zinc-50 border-b border-zinc-100">
-              {["Run ID", "Triggered By", "Reports", "Pass / Fail", "Duration", "Status", "Date"].map(col => (
+              {["Run ID", "Triggered By", "Reports", "Duration", "Status", "Date"].map(col => (
                 <th key={col} className="text-left text-[10px] font-semibold text-zinc-500 uppercase tracking-wider px-5 py-3">
                   {col}
                 </th>
@@ -52,17 +52,6 @@ export function RunsTable({ runs, onSelect }: RunsTableProps) {
                 </td>
                 <td className="px-5 py-3.5">
                   <span className="text-xs text-zinc-600">{run.totalReports}</span>
-                </td>
-                <td className="px-5 py-3.5">
-                  <div className="flex items-center text-xs">
-                    {run.status === "PASS" ? (
-                      <span className="text-emerald-600 font-semibold flex items-center gap-1">Pass ✓</span>
-                    ) : run.status === "FAIL" ? (
-                      <span className="text-red-500 font-semibold flex items-center gap-1">Fail ✗</span>
-                    ) : (
-                      <span className="text-zinc-400">—</span>
-                    )}
-                  </div>
                 </td>
                 <td className="px-5 py-3.5">
                   <span className="text-[10px] font-mono text-zinc-500">

@@ -11,10 +11,10 @@ import { ComparisonExplorer } from "@/components/comparison/ComparisonExplorer";
 import { useSidebar, useUpload, useSelection } from "@/hooks";
 import { useExportReport } from "@/hooks/useExportReport";
 import { useNotifications } from "@/context/NotificationsContext";
-import { computeStats, cn } from "@/lib/utils";
+import { computeStats } from "@/lib/utils";
 import { MOCK_REPORT_PAIRS } from "@/constants";
-import { validationService, type BackendResult } from "@/services/validationService";
-import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, DiffType, ValidationRun } from "@/types";
+import { validationService } from "@/services/validationService";
+import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, ValidationRun } from "@/types";
 
 // ─── Map backend result → frontend ReportPair ─────────────────────────────────
 //
@@ -33,22 +33,38 @@ function backendResultToReportPair(result: any): ReportPair {
 
     return {
       ...result,
+      overallStatus: (result.overallStatus ?? "PENDING").toUpperCase(),
       reportName: cleanRepoName(result.reportName),
       tableauWorkbook: result.tableauWorkbook?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, ""),
       powerbiReportName: result.powerbiReportName?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "")
     } as ReportPair;
   }
 
-  const toStatus = (s: string): ValidationStatus =>
-    (["PASS", "FAIL", "PENDING", "RUNNING"].includes(s) ? s : "PENDING") as ValidationStatus;
+  const toStatus = (s: string): ValidationStatus => {
+    const upper = (s ?? "").toUpperCase();
+    return (["PASS", "FAIL", "PENDING", "RUNNING", "ERROR", "REVIEW"].includes(upper)
+      ? upper : "PENDING") as ValidationStatus;
+  };
 
   const toLayer = (s: string): LayerStatus =>
-    (["pass", "fail", "pending", "running"].includes(s.toLowerCase())
-      ? s.toLowerCase()
+    (["pass", "fail", "pending", "running", "review", "error", "skipped"].includes((s ?? "").toLowerCase())
+      ? (s ?? "").toLowerCase()
       : "pending") as LayerStatus;
 
-  // Collect differences from all three layers
+  // Collect differences from all layers
   const differences: Difference[] = [];
+
+  // Visual layer (L1)
+  if (result.categories?.visual?.ai_analysis?.key_differences) {
+    result.categories.visual.ai_analysis.key_differences.forEach((diff: string) => {
+      differences.push({
+        type: "Visual Mismatch",
+        detail: diff,
+        severity: result.categories.visual.metrics?.risk_level === "high" ? "high" : "medium",
+        layer: "L1",
+      });
+    });
+  }
 
   // Data layer (L3) - details is an array
   if (result.categories?.data?.details) {
@@ -76,8 +92,8 @@ function backendResultToReportPair(result: any): ReportPair {
     });
   }
 
-  // Relationships layer (L1)
-  if (result.categories?.relationships?.details?.failure_reasons?.length > 0) {
+  // Relationships layer (L1 - Fallback if visual is missing but relationships exist)
+  if (!result.categories?.visual && result.categories?.relationships?.details?.failure_reasons?.length > 0) {
     result.categories.relationships.details.failure_reasons.forEach((reason: string) => {
       differences.push({
         type: "Missing Filter",
@@ -94,31 +110,66 @@ function backendResultToReportPair(result: any): ReportPair {
     return filename.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "");
   };
 
-  const twName = cleanName(result.inputs?.twbx_file || "");
-  const pbName = cleanName(result.inputs?.pbix_file || "");
+  const twName = cleanName(result.inputs?.twbx_file || result.tableauScreenshot || "");
+  const pbName = cleanName(result.inputs?.pbix_file || result.powerBiScreenshot || "");
 
   const finalName = result.reportName
     ? result.reportName.split(" vs ").map(cleanName).join(" vs ")
     : `${twName} vs ${pbName}`;
 
+  // Map visual result to internal type
+  const rawVisual = result.categories?.visual || result.visualResult;
+  let visualResult = undefined;
+
+  if (rawVisual) {
+    visualResult = {
+      status: toLayer(rawVisual.result || rawVisual.status),
+      pixelSimilarityPct: rawVisual.metrics?.similarity ?? rawVisual.pixelSimilarityPct,
+      gpt4oCalled: rawVisual.metrics?.gpt4o_called ?? (rawVisual.gpt4oRiskLevel !== undefined),
+      aiSummary: rawVisual.ai_analysis?.summary || rawVisual.aiSummary,
+      aiKeyDifferences: rawVisual.ai_analysis?.key_differences
+        ? JSON.stringify(rawVisual.ai_analysis.key_differences)
+        : (Array.isArray(rawVisual.aiKeyDifferences)
+          ? JSON.stringify(rawVisual.aiKeyDifferences)
+          : (typeof rawVisual.aiKeyDifferences === 'string' && rawVisual.aiKeyDifferences.trim().startsWith('[')
+            ? rawVisual.aiKeyDifferences
+            : JSON.stringify(rawVisual.aiKeyDifferences ? [rawVisual.aiKeyDifferences] : []))),
+      diffImagePath: rawVisual.images?.diff || rawVisual.diffImagePath,
+      comparisonImagePath: rawVisual.images?.comparison || rawVisual.comparisonImagePath,
+      tableauAnnotatedPath: rawVisual.images?.tableau_annotated || rawVisual.tableauAnnotatedPath,
+      powerbiAnnotatedPath: rawVisual.images?.powerbi_annotated || rawVisual.powerbiAnnotatedPath,
+    };
+  }
+
   return {
-    id: result.comparison_id || result.id,
+    id: result.id || result.comparison_id,
     projectId: "proj-001",
-    runId: result.comparison_id || result.id,
+    runId: result.runId || result.comparison_id || result.id,
     reportName: finalName,
     overallStatus: toStatus(result.overall_result || result.overallStatus),
-    layer1Status: toLayer(result.categories?.relationships?.result || result.layer1Status || "pending"),
+    overallRisk: result.categories?.visual?.metrics?.risk_level || result.visualResult?.gpt4oRiskLevel,
+    layer1Status: result.categories?.visual !== undefined
+      ? toLayer(result.categories.visual.result || result.layer1Status || "pending")
+      : "skipped",
     layer2Status: toLayer(result.categories?.semantic_model?.result || result.layer2Status || "pending"),
     layer3Status: toLayer(result.categories?.data?.result || result.layer3Status || "pending"),
     differences,
-    createdAt: result.timestamp || result.createdAt,
-    updatedAt: result.timestamp || result.updatedAt || result.createdAt,
+    visualResult: visualResult as any,
+    tableauScreenshot: result.tableauScreenshot,
+    powerBiScreenshot: result.powerBiScreenshot,
+    tableauWorkbook: twName,
+    powerBiReportName: pbName,
+    createdAt: result.createdAt || result.timestamp,
+    updatedAt: result.updatedAt || result.createdAt || result.timestamp
   };
 }
 
 function backendRunToValidationRun(run: any): ValidationRun {
-  const toStatus = (s: string): ValidationStatus =>
-    (["PASS", "FAIL", "PENDING", "RUNNING", "ERROR"].includes(s) ? s : "PENDING") as ValidationStatus;
+  const toStatus = (s: string): ValidationStatus => {
+    const upper = (s ?? "").toUpperCase();
+    return (["PASS", "FAIL", "PENDING", "RUNNING", "ERROR", "REVIEW"].includes(upper)
+      ? upper : "PENDING") as ValidationStatus;
+  };
 
   return {
     id: String(run.id),
@@ -132,6 +183,42 @@ function backendRunToValidationRun(run: any): ValidationRun {
     startedAt: run.started_at,
     completedAt: run.completed_at,
   };
+}
+
+// ─── Derive run status from its paired results ────────────────────────────────
+//
+// The backend often leaves run.status as PENDING even after completion.
+// Cross-reference with the report pairs that belong to this run to get the
+// real outcome.
+
+function deriveRunStatus(run: ValidationRun, pairs: ReportPair[]): ValidationRun {
+  // Already a terminal / accurate status — keep it
+  if (run.status === "FAIL" || run.status === "PASS" || run.status === "ERROR") return run;
+
+  // String-coerce both sides — JSON may serialize the FK as int or string
+  let runPairs = pairs.filter(p => p.runId != null && String(p.runId) === String(run.id));
+
+  // Fallback for older rows where run_id was not stored: match by date window.
+  // If a run completed and only one pair was created within that window, use it.
+  if (runPairs.length === 0 && run.completedAt) {
+    const start = new Date(run.startedAt).getTime();
+    const end   = new Date(run.completedAt).getTime() + 5_000; // 5 s buffer
+    const orphans = pairs.filter(p => !p.runId);
+    const inWindow = orphans.filter(p => {
+      const t = new Date(p.createdAt).getTime();
+      return t >= start && t <= end;
+    });
+    if (inWindow.length === 1) runPairs = inWindow;
+  }
+
+  if (runPairs.length === 0) return run;
+
+  const hasError = runPairs.some(p => (p.overallStatus ?? "").toUpperCase() === "ERROR");
+  const hasFail  = runPairs.some(p => (p.overallStatus ?? "").toUpperCase() === "FAIL");
+  const allPass  = runPairs.every(p => (p.overallStatus ?? "").toUpperCase() === "PASS");
+
+  const derived: ValidationStatus = hasError ? "ERROR" : hasFail ? "FAIL" : allPass ? "PASS" : run.status;
+  return { ...run, status: derived };
 }
 
 // ─── Page Title Map ───────────────────────────────────────────────────────────
@@ -395,7 +482,10 @@ export default function DashboardPage() {
 
             {/* ── Runs ───────────────────────────────────────────────────── */}
             {activeNav === "runs" && (
-              <RunsTable runs={liveRuns} onSelect={run => handleLoadRun(run.id)} />
+              <RunsTable
+                runs={liveRuns.map(r => deriveRunStatus(r, livePairs))}
+                onSelect={run => handleLoadRun(run.id)}
+              />
             )}
 
             {/* ── Results ────────────────────────────────────────────────── */}
@@ -433,7 +523,7 @@ export default function DashboardPage() {
             {/* ── Explorer ───────────────────────────────────────────────── */}
             {activeNav === "explorer" && (
               <ComparisonExplorer
-                pairs={[...livePairs, ...MOCK_REPORT_PAIRS]}
+                pairs={livePairs.length > 0 ? livePairs : MOCK_REPORT_PAIRS}
                 initialLeftId={explorerSelection}
               />
             )}

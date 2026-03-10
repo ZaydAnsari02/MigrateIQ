@@ -22,7 +22,7 @@ export function useUpload() {
   const reset = useCallback(() => setFiles({}), []);
 
   const uploadCount = Object.keys(files).length;
-  const isReady = uploadCount >= 2; // at minimum twb + pbix
+  const isReady = !!files.twb && !!files.pbix;
 
   const fileSummary = Object.entries(files).map(([id, file]) => ({
     id,
@@ -45,18 +45,18 @@ export function useSidebar(defaultCollapsed = false) {
 
 export function useSelection<T = string>() {
   const [selected, setSelected] = useState<T | null>(null);
-  const select   = useCallback((id: T) => setSelected(id), []);
+  const select = useCallback((id: T) => setSelected(id), []);
   const deselect = useCallback(() => setSelected(null), []);
-  const toggle   = useCallback((id: T) => setSelected(prev => prev === id ? null : id), []);
+  const toggle = useCallback((id: T) => setSelected(prev => prev === id ? null : id), []);
   return { selected, select, deselect, toggle };
 }
 
 // ─── useAsync ─────────────────────────────────────────────────────────────────
 
 export function useAsync<T>(fn: () => Promise<T>) {
-  const [data, setData]       = useState<T | null>(null);
+  const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError]     = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const execute = useCallback(async () => {
     setLoading(true);

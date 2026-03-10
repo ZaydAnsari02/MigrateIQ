@@ -106,9 +106,9 @@ function ResultRow({ pair, selected, checked, onChecked, onClick, onMoreInfo }: 
       <td className="px-3 py-3.5">
         <span className={cn(
           "text-[10px] font-medium px-2 py-0.5 rounded",
-          tableauCaptured ? "text-emerald-600 bg-emerald-50" : "text-zinc-400 bg-zinc-50"
+          tableauCaptured ? "text-emerald-600 bg-emerald-50" : "text-slate-400 bg-slate-50"
         )}>
-          {tableauCaptured ? "Captured" : "Pending"}
+          {tableauCaptured ? "Captured" : "Not Provided"}
         </span>
       </td>
 
@@ -116,9 +116,9 @@ function ResultRow({ pair, selected, checked, onChecked, onClick, onMoreInfo }: 
       <td className="px-3 py-3.5">
         <span className={cn(
           "text-[10px] font-medium px-2 py-0.5 rounded",
-          pbiCaptured ? "text-emerald-600 bg-emerald-50" : "text-amber-600 bg-amber-50"
+          pbiCaptured ? "text-emerald-600 bg-emerald-50" : "text-slate-400 bg-slate-50"
         )}>
-          {pbiCaptured ? "Captured" : "Pending"}
+          {pbiCaptured ? "Captured" : "Not Provided"}
         </span>
       </td>
 
