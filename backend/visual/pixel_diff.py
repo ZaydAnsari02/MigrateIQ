@@ -664,32 +664,17 @@ def compute_pixel_diff(
 
     logger.debug("Hash distance: %d / %d", hash_dist, _HASH_SIZE ** 2)
 
-    # ── Step 4 — Save visual diff image ─────────────────────────────────────
-    diff_path = _diff_output_path(diff_output_dir, report_name)
-    Path(diff_output_dir).mkdir(parents=True, exist_ok=True)
-    _build_diff_image(arr_t, arr_p, diff_path)
-
-    # ── Step 5 — Save heatmap-annotated images (one per source) + composite ──
-    tab_ann_path  = _annotated_output_path(diff_output_dir, report_name, "tableau")
-    pbi_ann_path  = _annotated_output_path(diff_output_dir, report_name, "powerbi")
-    comp_path     = _comparison_output_path(diff_output_dir, report_name)
-
-    _build_annotated_image(arr_t, diff_mask, tab_ann_path)
-    _build_annotated_image(arr_p, diff_mask, pbi_ann_path)
-    _build_comparison_image(arr_t, arr_p, diff_mask, comp_path, similarity_pct=similarity)
-    logger.info("[%s] Annotated images and comparison report card saved", report_name)
-
     result = PixelDiffResult(
         similarity_pct         = similarity,
         diff_pixel_count       = diff_count,
         total_pixels           = total,
         hash_distance          = hash_dist,
-        diff_image_path        = diff_path,
+        diff_image_path        = "",
         compared_width         = NORM_W,
         compared_height        = NORM_H,
-        tableau_annotated_path = tab_ann_path,
-        powerbi_annotated_path = pbi_ann_path,
-        comparison_image_path  = comp_path,
+        tableau_annotated_path = "",
+        powerbi_annotated_path = "",
+        comparison_image_path  = "",
     )
 
     logger.info(
