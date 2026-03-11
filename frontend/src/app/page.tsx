@@ -14,7 +14,8 @@ import { useExportReport } from "@/hooks/useExportReport";
 import { useNotifications } from "@/context/NotificationsContext";
 import { computeStats } from "@/lib/utils";
 import { validationService } from "@/services/validationService";
-import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, ValidationRun } from "@/types";
+import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, ValidationRun, ExcludedParameters } from "@/types";
+import { DEFAULT_EXCLUDED_PARAMS, excludedToEnabled } from "@/types";
 
 // ─── Map backend result → frontend ReportPair ─────────────────────────────────
 //
@@ -124,8 +125,8 @@ function backendResultToReportPair(result: any): ReportPair {
   if (rawVisual) {
     visualResult = {
       status: toLayer(rawVisual.result || rawVisual.status),
-      pixelSimilarityPct: rawVisual.metrics?.similarity ?? rawVisual.pixelSimilarityPct,
-      gpt4oCalled: rawVisual.metrics?.gpt4o_called ?? (rawVisual.gpt4oRiskLevel !== undefined),
+      gpt4oCalled: rawVisual.metrics?.gpt4o_called ?? rawVisual.gpt4oCalled ?? (rawVisual.gpt4oRiskLevel !== undefined),
+      gpt4oRiskLevel: rawVisual.metrics?.risk_level ?? rawVisual.gpt4oRiskLevel,
       aiSummary: rawVisual.ai_analysis?.summary || rawVisual.aiSummary,
       aiKeyDifferences: rawVisual.ai_analysis?.key_differences
         ? JSON.stringify(rawVisual.ai_analysis.key_differences)
@@ -134,10 +135,17 @@ function backendResultToReportPair(result: any): ReportPair {
           : (typeof rawVisual.aiKeyDifferences === 'string' && rawVisual.aiKeyDifferences.trim().startsWith('[')
             ? rawVisual.aiKeyDifferences
             : JSON.stringify(rawVisual.aiKeyDifferences ? [rawVisual.aiKeyDifferences] : []))),
-      diffImagePath: rawVisual.images?.diff || rawVisual.diffImagePath,
-      comparisonImagePath: rawVisual.images?.comparison || rawVisual.comparisonImagePath,
-      tableauAnnotatedPath: rawVisual.images?.tableau_annotated || rawVisual.tableauAnnotatedPath,
-      powerbiAnnotatedPath: rawVisual.images?.powerbi_annotated || rawVisual.powerbiAnnotatedPath,
+      // Per-parameter match booleans (passed through from /report-pairs response)
+      chartTypeMatch:    rawVisual.chartTypeMatch,
+      colorSchemeMatch:  rawVisual.colorSchemeMatch,
+      legendMatch:       rawVisual.legendMatch,
+      axisLabelsMatch:   rawVisual.axisLabelsMatch,
+      axisScaleMatch:    rawVisual.axisScaleMatch,
+      titleMatch:        rawVisual.titleMatch,
+      dataLabelsMatch:   rawVisual.dataLabelsMatch,
+      layoutMatch:       rawVisual.layoutMatch,
+      textContentMatch:  rawVisual.textContentMatch,
+      parameterResults:  rawVisual.parameterResults,
     };
   }
 
@@ -270,6 +278,7 @@ export default function DashboardPage() {
   const [apiError, setApiError] = useState<string | null>(null);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
   const [explorerSelection, setExplorerSelection] = useState<string | undefined>(undefined);
+  const [excludedParams, setExcludedParams] = useState<ExcludedParameters>({ ...DEFAULT_EXCLUDED_PARAMS });
 
   // All real results that have come back from the backend this session
   const [livePairs, setLivePairs] = useState<ReportPair[]>([]);
@@ -331,6 +340,7 @@ export default function DashboardPage() {
       const result = await validationService.startValidation(
         upload.files,
         setUploadPct,
+        excludedToEnabled(excludedParams),
       );
       const pair = backendResultToReportPair(result);
       setLivePairs(prev => [pair, ...prev]);
@@ -460,6 +470,8 @@ export default function DashboardPage() {
                   onRemove={upload.removeFile}
                   onStart={handleStartValidation}
                   loading={startLoading}
+                  excludedParams={excludedParams}
+                  onExcludedParamsChange={setExcludedParams}
                 />
                 {/* Upload progress bar */}
                 {startLoading && uploadPct > 0 && uploadPct < 100 && (

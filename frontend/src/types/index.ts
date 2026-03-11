@@ -63,30 +63,25 @@ export interface ReportPair {
 export interface VisualResult {
   id: string;
   reportPairId: string;
-  pixelSimilarityPct?: number;
-  pixelDiffCount?: number;
-  totalPixels?: number;
-  hashDistance?: number;
-  diffImagePath?: string;
-  comparisonImagePath?: string;
-  tableauAnnotatedPath?: string;
-  powerbiAnnotatedPath?: string;
-  comparedWidth?: number;
-  comparedHeight?: number;
   gpt4oCalled: boolean;
+  // Per-parameter match booleans from GPT-4o
   chartTypeMatch?: boolean;
   colorSchemeMatch?: boolean;
   layoutMatch?: boolean;
   axisLabelsMatch?: boolean;
+  axisScaleMatch?: boolean;
   legendMatch?: boolean;
   titleMatch?: boolean;
   dataLabelsMatch?: boolean;
+  textContentMatch?: boolean;
   aiSummary?: string;
-  aiKeyDifferences?: string;
+  aiKeyDifferences?: string | string[];
   aiRawResponse?: string;
+  gpt4oRiskLevel?: "low" | "medium" | "high";
   status: LayerStatus;
-  passThresholdPct: number;
   createdAt: string;
+  parametersUsed?: VisualComparisonParameters;
+  parameterResults?: VisualParameterResults;
 }
 
 export interface SemanticResult {
@@ -149,6 +144,95 @@ export interface Difference {
   severity: DiffSeverity;
   layer: "L1" | "L2" | "L3";
 }
+
+// ─── Visual Comparison Parameters ─────────────────────────────────────────────
+
+/** API-facing: True = validate this parameter (backend receives enabled map) */
+export interface VisualComparisonParameters {
+  chart_type:   boolean;
+  color:        boolean;
+  legend:       boolean;
+  axis_labels:  boolean;
+  axis_scale:   boolean;
+  title:        boolean;
+  data_labels:  boolean;
+  layout:       boolean;
+  text_content: boolean;
+  text_case:    boolean;
+}
+
+/** All parameters enabled (strict mode) */
+export const DEFAULT_VISUAL_PARAMS: VisualComparisonParameters = {
+  chart_type:   true,
+  color:        true,
+  legend:       true,
+  axis_labels:  true,
+  axis_scale:   true,
+  title:        true,
+  data_labels:  true,
+  layout:       true,
+  text_content: true,
+  text_case:    true,
+};
+
+/** UI-facing exclusion map: True = this parameter is EXCLUDED / ignored */
+export type ExcludedParameters = VisualComparisonParameters;
+
+/** Default: nothing excluded (= full strict validation) */
+export const DEFAULT_EXCLUDED_PARAMS: ExcludedParameters = {
+  chart_type:   false,
+  color:        false,
+  legend:       false,
+  axis_labels:  false,
+  axis_scale:   false,
+  title:        false,
+  data_labels:  false,
+  layout:       false,
+  text_content: false,
+  text_case:    false,
+};
+
+/** Convert exclusion map → enabled map for the backend */
+export function excludedToEnabled(ex: ExcludedParameters): VisualComparisonParameters {
+  return {
+    chart_type:   !ex.chart_type,
+    color:        !ex.color,
+    legend:       !ex.legend,
+    axis_labels:  !ex.axis_labels,
+    axis_scale:   !ex.axis_scale,
+    title:        !ex.title,
+    data_labels:  !ex.data_labels,
+    layout:       !ex.layout,
+    text_content: !ex.text_content,
+    text_case:    !ex.text_case,
+  };
+}
+
+export type ParameterStatus = "pass" | "fail" | "ignored" | "skipped";
+
+export interface VisualParameterResults {
+  chart_type:   ParameterStatus;
+  color:        ParameterStatus;
+  legend:       ParameterStatus;
+  axis_labels:  ParameterStatus;
+  axis_scale:   ParameterStatus;
+  title:        ParameterStatus;
+  data_labels:  ParameterStatus;
+  layout:       ParameterStatus;
+  text_content: ParameterStatus;
+}
+
+// ─── Card Visibility ──────────────────────────────────────────────────────────
+
+export interface CardVisibility {
+  visualBreakdown: boolean;   // Parameter results table after re-run
+  regressionLog:   boolean;   // All-layers regression log
+}
+
+export const DEFAULT_CARD_VISIBILITY: CardVisibility = {
+  visualBreakdown: true,
+  regressionLog:   true,
+};
 
 // ─── Upload ───────────────────────────────────────────────────────────────────
 

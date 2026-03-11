@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Header
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker, joinedload
@@ -99,6 +99,7 @@ async def validate_reports(
     pbix:  UploadFile = File(...),
     tableau_screenshot: Optional[UploadFile] = File(None),
     pbi_screenshot: Optional[UploadFile] = File(None),
+    visual_parameters: Optional[str] = Form(None),  # JSON string of param flags
     db: Session = Depends(get_db),
     x_token: Optional[str] = Header(None),
 ):
@@ -229,10 +230,12 @@ async def validate_reports(
             # ─── Layer 1: Visual Validation ───────────────────────────────────
             if tab_screenshot_path and pbi_screenshot_path:
                 try:
+                    _vis_params = json.loads(visual_parameters) if visual_parameters else None
                     run_visual_validation(
                         db, pair,
                         openai_api_key  = config.OPENAI_API_KEY,
-                        diff_output_dir = str(BACKEND_DIR / "screenshots" / "diffs")
+                        diff_output_dir = str(BACKEND_DIR / "screenshots" / "diffs"),
+                        parameters      = _vis_params,
                     )
                     # Status is updated and committed inside run_visual_validation;
                     # refresh pair so overall_status reflects those DB writes.
@@ -279,6 +282,64 @@ async def validate_reports(
         )
 
 
+def _build_visual_result_dict(vr) -> dict:
+    """Serialize a VisualResult ORM object for the frontend, including parameter results."""
+    from visual.prompts import DEFAULT_PARAMS
+    stored_params = json.loads(vr.visual_parameters) if vr.visual_parameters else None
+    params_used = {**DEFAULT_PARAMS, **(stored_params or {})}
+
+    def _match_status(field_val, param_key: str) -> str:
+        """Return pass/fail/ignored/skipped for a single parameter."""
+        if field_val is None:
+            return "skipped"
+        # New format: DB stores "pass"/"fail"/"ignored" strings directly from GPT
+        if isinstance(field_val, str) and field_val.lower() in ("pass", "fail", "ignored"):
+            return field_val.lower()
+        # Legacy format: "True"/"False" strings or actual bools — apply params_used check
+        if not params_used.get(param_key, True):
+            return "ignored"
+        if isinstance(field_val, str):
+            return "pass" if field_val.lower() == "true" else "fail"
+        return "pass" if field_val else "fail"
+
+    # Build parameter results — one entry per visual parameter
+    param_results = {
+        "chart_type":   _match_status(vr.chart_type_match,    "chart_type"),
+        "color":        _match_status(vr.color_scheme_match,  "color"),
+        "legend":       _match_status(vr.legend_match,        "legend"),
+        "axis_labels":  _match_status(vr.axis_labels_match,   "axis_labels"),
+        "axis_scale":   _match_status(vr.axis_scale_match,    "axis_scale"),
+        "title":        _match_status(vr.title_match,         "title"),
+        "data_labels":  _match_status(vr.data_labels_match,   "data_labels"),
+        "layout":       _match_status(vr.layout_match,        "layout"),
+        "text_content": _match_status(vr.text_content_match,  "text_content"),
+    }
+
+    # Derive overall result from parameter results
+    has_fail = any(s == "fail" for s in param_results.values())
+    derived_status = "fail" if has_fail else (vr.status or "skipped")
+
+    return {
+        "status":           derived_status,
+        "gpt4oCalled":      vr.gpt4o_called,
+        "aiSummary":        vr.ai_summary,
+        "aiKeyDifferences": json.loads(vr.ai_key_differences) if vr.ai_key_differences else [],
+        "gpt4oRiskLevel":   vr.gpt4o_risk_level,
+        "parametersUsed":   params_used,
+        "parameterResults": param_results,
+        # Match booleans for client-side re-computation
+        "chartTypeMatch":   vr.chart_type_match,
+        "colorSchemeMatch": vr.color_scheme_match,
+        "legendMatch":      vr.legend_match,
+        "axisLabelsMatch":  vr.axis_labels_match,
+        "axisScaleMatch":   vr.axis_scale_match,
+        "titleMatch":       vr.title_match,
+        "dataLabelsMatch":  vr.data_labels_match,
+        "layoutMatch":      vr.layout_match,
+        "textContentMatch": vr.text_content_match,
+    }
+
+
 def _visual_diff_type(detail: str) -> str:
     """Derive a human-readable difference type from the AI-generated detail text."""
     d = detail.lower()
@@ -305,6 +366,87 @@ def _visual_diff_type(detail: str) -> str:
     if any(k in d for k in ("font", "text size", "font size")):
         return "Text Style Difference"
     return "Visual Difference"
+
+
+# ─── POST /report-pairs/{pair_id}/visual-validate ────────────────────────────
+# Re-run visual validation for an existing report pair with custom parameters.
+
+class VisualValidateRequest(BaseModel):
+    parameters: Optional[dict] = None   # e.g. {"color": False, "legend": True, ...}
+
+
+@app.post("/report-pairs/{pair_id}/visual-validate")
+async def re_run_visual_validate(
+    pair_id: int,
+    body: VisualValidateRequest,
+    db: Session = Depends(get_db),
+    x_token: Optional[str] = Header(None),
+):
+    """Re-run Layer 1 visual comparison for an existing report pair.
+
+    Accepts a parameters dict so users can selectively enable/disable
+    comparison attributes (color, legend, axis_labels, etc.).
+    All parameters default to True (strict mode) when omitted.
+    """
+    pair = db.query(ReportPair).filter(ReportPair.id == pair_id).first()
+    if not pair:
+        raise HTTPException(status_code=404, detail=f"Report pair {pair_id} not found.")
+
+    if not pair.tableau_screenshot or not pair.powerbi_screenshot:
+        raise HTTPException(
+            status_code=422,
+            detail="Report pair is missing Tableau or Power BI screenshot paths.",
+        )
+
+    # Resolve absolute paths (stored as relative "screenshots/<name>")
+    def _abs(rel: str) -> str:
+        if os.path.isabs(rel):
+            return rel
+        return str(BACKEND_DIR / rel)
+
+    tab_abs = _abs(pair.tableau_screenshot)
+    pbi_abs = _abs(pair.powerbi_screenshot)
+
+    for label, path in [("Tableau", tab_abs), ("Power BI", pbi_abs)]:
+        if not os.path.exists(path):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{label} screenshot file not found on server: {path}",
+            )
+
+    # Update the pair screenshot paths to absolute so the pipeline can open them
+    pair.tableau_screenshot = tab_abs
+    pair.powerbi_screenshot = pbi_abs
+
+    # Delete existing VisualResult so we can create a fresh one
+    from db.models import VisualResult as VisualResultModel
+    existing_vr = db.query(VisualResultModel).filter(
+        VisualResultModel.report_pair_id == pair_id
+    ).first()
+    if existing_vr:
+        db.delete(existing_vr)
+        db.commit()
+
+    try:
+        vr = run_visual_validation(
+            db, pair,
+            openai_api_key  = config.OPENAI_API_KEY,
+            diff_output_dir = str(BACKEND_DIR / "screenshots" / "diffs"),
+            parameters      = body.parameters,
+        )
+        db.refresh(pair)
+    except Exception as exc:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"Visual validation failed: {exc}\n{traceback.format_exc()}")
+
+    # Delegate to the shared serializer so the response shape is identical
+    # to what /report-pairs returns via _build_visual_result_dict.
+    # We need to temporarily set visual_parameters on vr so the serializer
+    # picks up the parameters used in this run.
+    if body.parameters and not vr.visual_parameters:
+        vr.visual_parameters = json.dumps(body.parameters)
+
+    return _build_visual_result_dict(vr)
 
 
 # ─── GET /report-pairs ────────────────────────────────────────────────────────
@@ -380,17 +522,7 @@ async def list_report_pairs(db: Session = Depends(get_db)):
             "layer2Status": p.semantic_result.status if p.semantic_result else "PENDING",
             "layer3Status": p.data_result.status if p.data_result else "PENDING",
             "differences": differences,
-            "visualResult": {
-                "status": p.visual_result.status,
-                "pixelSimilarityPct": p.visual_result.pixel_similarity_pct,
-                "aiSummary": p.visual_result.ai_summary,
-                "aiKeyDifferences": json.loads(p.visual_result.ai_key_differences) if p.visual_result.ai_key_differences else [],
-                "gpt4oRiskLevel": p.visual_result.gpt4o_risk_level,
-                "tableauAnnotatedPath": get_screenshot_url(p.visual_result.tableau_annotated_path),
-                "powerbiAnnotatedPath": get_screenshot_url(p.visual_result.powerbi_annotated_path),
-                "comparisonImagePath": get_screenshot_url(p.visual_result.comparison_image_path),
-                "diffImagePath": get_screenshot_url(p.visual_result.diff_image_path),
-            } if p.visual_result else None,
+            "visualResult": _build_visual_result_dict(p.visual_result) if p.visual_result else None,
             "tableauWorkbook": p.tableau_workbook,
             "powerbiReportName": p.powerbi_report_name,
             "tableauScreenshot": get_screenshot_url(p.tableau_screenshot),

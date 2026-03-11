@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 try:
     from openai import OpenAI, AzureOpenAI
@@ -23,6 +23,10 @@ from visual.prompts import (
     SPATIAL_SYSTEM_PROMPT as _SPATIAL_SYSTEM_PROMPT,
     SPATIAL_USER_PROMPT as _SPATIAL_USER_PROMPT,
     SPATIAL_CORRECTION_PROMPT as _SPATIAL_CORRECTION_PROMPT,
+    build_user_prompt as _build_user_prompt,
+    DEFAULT_PARAMS as _DEFAULT_PARAMS,
+    GPT_TO_PARAM as _GPT_TO_PARAM,
+    PARAM_TO_GPT as _PARAM_TO_GPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,20 +35,16 @@ logger = logging.getLogger(__name__)
 RiskLevel = Literal["low", "medium", "high"]
 _VALID_RISK_LEVELS: frozenset[str] = frozenset({"low", "medium", "high"})
 
-# Required keys in the GPT-4o JSON response.
+# Required top-level keys in the GPT-4o JSON response (new structured format).
 _REQUIRED_KEYS: frozenset[str] = frozenset({
-    "chart_type_match",
-    "color_scheme_match",
-    "layout_match",
-    "axis_labels_match",
-    "legend_match",
-    "title_match",
-    "data_labels_match",
-    "key_differences",
+    "visual_parameters",
+    "differences",
     "summary",
     "risk_level",
-    "recommendation",
 })
+
+# Valid status values for each parameter in visual_parameters.
+_VALID_PARAM_STATUSES: frozenset[str] = frozenset({"pass", "fail", "ignored"})
 
 
 # ── Result dataclass ───────────────────────────────────────────────────────────
@@ -53,39 +53,85 @@ _REQUIRED_KEYS: frozenset[str] = frozenset({
 class VisionAnalysis:
     """
     Fully structured, immutable output from GPT-4o Vision.
-    Every field is typed — no raw dicts exposed to callers.
+
+    visual_parameters maps internal parameter keys (chart_type, color, …) to
+    "pass" | "fail" | "ignored".  This is the single source of truth for the
+    parameter table, PASS/FAIL calculation, and differences list.
     """
 
-    # Per-attribute match booleans
-    chart_type_match:   bool
-    color_scheme_match: bool
-    layout_match:       bool
-    axis_labels_match:  bool
-    legend_match:       bool
-    title_match:        bool
-    data_labels_match:  bool
+    # Structured parameter results — {internal_key: "pass"/"fail"/"ignored"}
+    visual_parameters: dict
 
-    # Narrative fields
-    key_differences: tuple    # ("Bar chart is now a column chart", ...)
-    summary:         str      # one-paragraph human-readable explanation
-    risk_level:      str      # "low" | "medium" | "high"
-    recommendation:  str      # what the migration team needs to fix
+    # Only differences for FAILED parameters (sourced directly from GPT)
+    differences: tuple
 
-    # Audit trail — never displayed to end users
+    # Narrative
+    summary:    str   # one-paragraph human-readable explanation
+    risk_level: str   # "low" | "medium" | "high"
+    confidence: float # 0.0 – 1.0
+
+    # Audit trail
     raw_response: str
 
     # Whether this result came from a successful API call or the error fallback
     is_error_fallback: bool = False
 
+    # Parameters used for this comparison (None = all enabled / strict mode)
+    parameters_used: Optional[Dict[str, bool]] = field(default=None)
+
+    # ── Backward-compat properties (read from visual_parameters) ─────────────
+    @property
+    def chart_type_match(self) -> bool:
+        return self.visual_parameters.get("chart_type") == "pass"
+
+    @property
+    def color_scheme_match(self) -> bool:
+        return self.visual_parameters.get("color") == "pass"
+
+    @property
+    def layout_match(self) -> bool:
+        return self.visual_parameters.get("layout") == "pass"
+
+    @property
+    def axis_labels_match(self) -> bool:
+        return self.visual_parameters.get("axis_labels") == "pass"
+
+    @property
+    def axis_scale_match(self) -> bool:
+        return self.visual_parameters.get("axis_scale") == "pass"
+
+    @property
+    def legend_match(self) -> bool:
+        return self.visual_parameters.get("legend") == "pass"
+
+    @property
+    def title_match(self) -> bool:
+        return self.visual_parameters.get("title") == "pass"
+
+    @property
+    def data_labels_match(self) -> bool:
+        return self.visual_parameters.get("data_labels") == "pass"
+
+    @property
+    def text_content_match(self) -> bool:
+        return self.visual_parameters.get("text_content") == "pass"
+
+    @property
+    def key_differences(self) -> tuple:
+        """Alias for backward compatibility."""
+        return self.differences
+
+    @property
+    def recommendation(self) -> str:
+        """Derived from differences — kept for backward compat."""
+        if not self.differences:
+            return "No action required."
+        return "Address the following before sign-off: " + "; ".join(self.differences[:3])
+
     @property
     def match_count(self) -> int:
-        """Number of visual attributes that match (out of 7)."""
-        flags = [
-            self.chart_type_match, self.color_scheme_match, self.layout_match,
-            self.axis_labels_match, self.legend_match, self.title_match,
-            self.data_labels_match,
-        ]
-        return sum(flags)
+        """Number of parameters that passed (out of non-ignored)."""
+        return sum(1 for v in self.visual_parameters.values() if v == "pass")
 
     @property
     def is_high_risk(self) -> bool:
@@ -125,7 +171,7 @@ def _build_image_block(path: str) -> dict:
 
 # ── Response parsing ───────────────────────────────────────────────────────────
 
-def _parse_response(raw: str) -> VisionAnalysis:
+def _parse_response(raw: str, parameters_used: Optional[Dict[str, bool]] = None) -> VisionAnalysis:
     """
     Parse the raw GPT-4o JSON string into a VisionAnalysis.
 
@@ -147,20 +193,40 @@ def _parse_response(raw: str) -> VisionAnalysis:
             f"Unexpected risk_level {risk!r}. Expected one of {_VALID_RISK_LEVELS}."
         )
 
+    # Parse visual_parameters — map GPT keys → internal keys, validate statuses
+    raw_params = data["visual_parameters"]
+    if not isinstance(raw_params, dict):
+        raise ValueError("visual_parameters must be a JSON object")
+
+    visual_parameters: dict[str, str] = {}
+    for gpt_key, status in raw_params.items():
+        status_str = str(status).strip().lower()
+        if status_str not in _VALID_PARAM_STATUSES:
+            raise ValueError(
+                f"Invalid status {status_str!r} for parameter {gpt_key!r}. "
+                f"Expected one of {_VALID_PARAM_STATUSES}."
+            )
+        internal_key = _GPT_TO_PARAM.get(gpt_key, gpt_key)
+        visual_parameters[internal_key] = status_str
+
+    # Ensure all 9 internal parameters are present (fill missing as "ignored")
+    for internal_key in _GPT_TO_PARAM.values():
+        if internal_key not in visual_parameters:
+            logger.warning("GPT-4o response missing parameter %r — defaulting to 'ignored'", internal_key)
+            visual_parameters[internal_key] = "ignored"
+
+    differences = tuple(str(d) for d in data.get("differences", []))
+    confidence  = float(data.get("confidence", 0.0))
+
     return VisionAnalysis(
-        chart_type_match   = bool(data["chart_type_match"]),
-        color_scheme_match = bool(data["color_scheme_match"]),
-        layout_match       = bool(data["layout_match"]),
-        axis_labels_match  = bool(data["axis_labels_match"]),
-        legend_match       = bool(data["legend_match"]),
-        title_match        = bool(data["title_match"]),
-        data_labels_match  = bool(data["data_labels_match"]),
-        key_differences    = tuple(data["key_differences"]),
-        summary            = str(data["summary"]),
-        risk_level         = risk,
-        recommendation     = str(data["recommendation"]),
-        raw_response       = raw,
-        is_error_fallback  = False,
+        visual_parameters = visual_parameters,
+        differences       = differences,
+        summary           = str(data["summary"]),
+        risk_level        = risk,
+        confidence        = confidence,
+        raw_response      = raw,
+        is_error_fallback = False,
+        parameters_used   = parameters_used,
     )
 
 
@@ -171,20 +237,16 @@ def _make_error_result(reason: str) -> VisionAnalysis:
     escalates the pair to FAIL status, triggering manual review.
     """
     logger.error("GPT-4o analysis failed — returning error fallback. Reason: %s", reason)
+    # All parameters unknown — mark as "ignored" so they don't trigger false FAILs
+    error_params = {k: "ignored" for k in _GPT_TO_PARAM.values()}
     return VisionAnalysis(
-        chart_type_match   = False,
-        color_scheme_match = False,
-        layout_match       = False,
-        axis_labels_match  = False,
-        legend_match       = False,
-        title_match        = False,
-        data_labels_match  = False,
-        key_differences    = ("GPT-4o analysis failed — manual review required",),
-        summary            = f"Automated analysis could not complete: {reason}",
-        risk_level         = "high",
-        recommendation     = "Review this report pair manually before sign-off.",
-        raw_response       = "",
-        is_error_fallback  = True,
+        visual_parameters = error_params,
+        differences       = ("GPT-4o analysis failed — manual review required",),
+        summary           = f"Automated analysis could not complete: {reason}",
+        risk_level        = "high",
+        confidence        = 0.0,
+        raw_response      = "",
+        is_error_fallback = True,
     )
 
 
@@ -365,11 +427,12 @@ def _make_spatial_error(reason: str) -> SpatialAnalysis:
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def analyze_with_gpt4o(
-    tableau_path: str,
-    powerbi_path: str,
-    api_key:      Optional[str] = None,
-    max_retries:  int = 2,
-    timeout:      int = 60,
+    tableau_path:    str,
+    powerbi_path:    str,
+    api_key:         Optional[str] = None,
+    max_retries:     int = 2,
+    timeout:         int = 60,
+    parameters:      Optional[Dict[str, bool]] = None,
 ) -> VisionAnalysis:
     """
     Send a Tableau + Power BI screenshot pair to GPT-4o Vision for analysis.
@@ -384,6 +447,9 @@ def analyze_with_gpt4o(
         api_key:       OpenAI API key; falls back to OPENAI_API_KEY in config/env
         max_retries:   number of extra attempts if JSON is malformed (default 2)
         timeout:       HTTP request timeout in seconds (default 60)
+        parameters:    dict of comparison parameter flags (e.g. {"color": False}).
+                       Omitted keys default to True (strict mode).
+                       Pass None for full strict validation (all parameters enabled).
 
     Returns:
         VisionAnalysis — fully typed and immutable; callers must check
@@ -436,6 +502,9 @@ def analyze_with_gpt4o(
             model_or_deployment, tableau_path, powerbi_path,
         )
 
+    # Build dynamic prompt based on selected parameters (None = strict/all-enabled).
+    user_prompt = _build_user_prompt(parameters)
+
     # Build the initial message list.
     messages: list[dict] = [
         {"role": "system", "content": _SYSTEM_PROMPT},
@@ -444,7 +513,7 @@ def analyze_with_gpt4o(
             "content": [
                 _build_image_block(tableau_path),   # first image  = Tableau original
                 _build_image_block(powerbi_path),   # second image = Power BI migration
-                {"type": "text", "text": _USER_PROMPT},
+                {"type": "text", "text": user_prompt},
             ],
         },
     ]
@@ -471,7 +540,7 @@ def analyze_with_gpt4o(
         raw = response.choices[0].message.content or ""
 
         try:
-            result = _parse_response(raw)
+            result = _parse_response(raw, parameters_used=parameters)
             logger.info(
                 "%s analysis complete: risk=%s, differences=%d",
                 model_or_deployment, result.risk_level, len(result.key_differences),

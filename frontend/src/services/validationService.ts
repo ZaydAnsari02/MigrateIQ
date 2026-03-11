@@ -8,7 +8,7 @@
  */
 
 import axios, { AxiosError } from "axios";
-import type { UploadedFiles } from "@/types";
+import type { UploadedFiles, VisualComparisonParameters } from "@/types";
 
 // ─── Axios instance ───────────────────────────────────────────────────────────
 
@@ -140,6 +140,7 @@ export const validationService = {
   async startValidation(
     files: UploadedFiles,
     onProgress?: (pct: number) => void,
+    visualParameters?: VisualComparisonParameters | null,
   ): Promise<BackendResult> {
     if (!files.twb || !files.pbix) {
       throw new Error("Both a Tableau workbook (.twbx) and a Power BI file (.pbix) are required.");
@@ -153,6 +154,9 @@ export const validationService = {
     // The backend handles both single images and .zip files.
     if (files.tableauScreenshots) form.append("tableau_screenshot", files.tableauScreenshots);
     if (files.pbiScreenshots) form.append("pbi_screenshot", files.pbiScreenshots);
+
+    // Attach visual comparison parameters if any exclusions are set
+    if (visualParameters) form.append("visual_parameters", JSON.stringify(visualParameters));
 
     try {
       const { data } = await api.post<BackendResult>("/validate", form, {

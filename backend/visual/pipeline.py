@@ -2,15 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 import config
-from visual.pixel_diff import (
-    compute_pixel_diff,
-    GPT4O_CALL_THRESHOLD,
-    PASS_THRESHOLD,
-    REVIEW_THRESHOLD,
-)
 from visual.gpt4o_analyzer import analyze_with_gpt4o, VisionAnalysis
 from db.models import VisualResult, ReportPair, Status, Risk
 
@@ -24,9 +18,10 @@ def run_visual_validation(
     report_pair:     ReportPair,
     openai_api_key:  Optional[str] = None,
     diff_output_dir: str = "screenshots/diffs",
+    parameters:      Optional[Dict[str, bool]] = None,
 ) -> VisualResult:
     """
-    Run Layer 1 visual validation for a single ReportPair.
+    Run visual validation for a single ReportPair using GPT-4o Vision only.
 
     Persists a VisualResult to the database and updates
     report_pair.overall_status with precedence-aware promotion
@@ -36,7 +31,8 @@ def run_visual_validation(
         session:         SQLAlchemy-compatible session
         report_pair:     must have tableau_screenshot and powerbi_screenshot set
         openai_api_key:  OpenAI key; falls back to OPENAI_API_KEY in config/env
-        diff_output_dir: directory where the red-highlight diff PNG is saved
+        diff_output_dir: unused (kept for API compatibility)
+        parameters:      dict of enabled flags (True = validate); None = all enabled
 
     Returns:
         VisualResult — the persisted record
@@ -46,7 +42,6 @@ def run_visual_validation(
     """
     name = report_pair.report_name
 
-    # Guard: both screenshots must be set before we can do anything.
     if not report_pair.tableau_screenshot:
         raise ValueError(f"[{name}] tableau_screenshot is not set on ReportPair")
     if not report_pair.powerbi_screenshot:
@@ -54,50 +49,24 @@ def run_visual_validation(
 
     logger.info("Starting visual validation for %r", name)
 
-    # ── Stage 1: Pixel diff ──────────────────────────────────────────────────
-    pixel = compute_pixel_diff(
-        tableau_path    = report_pair.tableau_screenshot,
-        powerbi_path    = report_pair.powerbi_screenshot,
-        diff_output_dir = diff_output_dir,
-        report_name     = name,
+    # ── GPT-4o Vision analysis ────────────────────────────────────────────────
+    vision: VisionAnalysis = analyze_with_gpt4o(
+        tableau_path = report_pair.tableau_screenshot,
+        powerbi_path = report_pair.powerbi_screenshot,
+        api_key      = openai_api_key or config.OPENAI_API_KEY,
+        parameters   = parameters,
     )
 
-    logger.info(
-        "[%s] Pixel similarity: %.1f%%  |  hash distance: %d/64",
-        name, pixel.similarity_pct, pixel.hash_distance,
-    )
+    logger.info("[%s] GPT-4o risk: %s", name, vision.risk_level.upper())
+    for diff in vision.key_differences[:3]:
+        logger.info("[%s]   • %s", name, diff)
 
-    # ── Stage 2: GPT-4o Vision (only when needed) ────────────────────────────
-    vision:       Optional[VisionAnalysis] = None
-    gpt4o_called: bool                     = False
-
-    if pixel.should_call_gpt4o:
-        logger.info(
-            "[%s] Similarity %.1f%% < %.1f%% threshold — calling GPT-4o Vision",
-            name, pixel.similarity_pct, GPT4O_CALL_THRESHOLD,
-        )
-        vision       = analyze_with_gpt4o(
-            tableau_path = report_pair.tableau_screenshot,
-            powerbi_path = report_pair.powerbi_screenshot,
-            api_key      = openai_api_key or config.OPENAI_API_KEY,
-        )
-        gpt4o_called = True
-        logger.info("[%s] GPT-4o risk: %s", name, vision.risk_level.upper())
-
-        for diff in vision.key_differences[:3]:   # log first 3 for visibility
-            logger.info("[%s]   • %s", name, diff)
-    else:
-        logger.info(
-            "[%s] Similarity %.1f%% ≥ %.1f%% — GPT-4o skipped (reports are visually identical)",
-            name, pixel.similarity_pct, GPT4O_CALL_THRESHOLD,
-        )
-
-    # ── Stage 3: Determine final status ─────────────────────────────────────
-    status = _determine_status(pixel.similarity_pct, vision)
+    # ── Determine final status ────────────────────────────────────────────────
+    status = _determine_status(vision, parameters)
     logger.info("[%s] Final status: %s", name, status.upper())
 
-    # ── Stage 4: Persist to database ─────────────────────────────────────────
-    vr = _build_visual_result(report_pair, pixel, vision, gpt4o_called, status)
+    # ── Persist to database ───────────────────────────────────────────────────
+    vr = _build_visual_result(report_pair, vision, status, parameters)
     session.add(vr)
 
     _promote_pair_status(report_pair, status, vision)
@@ -108,95 +77,85 @@ def run_visual_validation(
 
 
 def _determine_status(
-    similarity_pct: float,
-    vision: Optional[VisionAnalysis],
+    vision: VisionAnalysis,
+    parameters: Optional[Dict[str, bool]] = None,
 ) -> str:
     """
-    Derive the final PASS / REVIEW / FAIL status from pixel similarity and
-    optional GPT-4o risk level.
+    Derive the final PASS / FAIL status from GPT-4o match flags.
 
-    Escalation rules:
-      - PASS or REVIEW + GPT-4o HIGH risk → FAIL
-        (GPT-4o may catch meaningful structural issues the pixel diff misses)
-      - REVIEW + non-HIGH GPT-4o risk → stays REVIEW
-      - FAIL is never downgraded
+    PASS  = No FAIL parameters (excluding ignored)
+    FAIL  = Any parameter that is not excluded returns False from GPT
 
     Args:
-        similarity_pct: pixel similarity percentage (0.0–100.0)
-        vision:         GPT-4o result, or None if GPT-4o was not called
+        vision:     GPT-4o result
+        parameters: dict of enabled flags (True = validate); None = all enabled
 
     Returns:
-        One of Status.PASS, Status.REVIEW, Status.FAIL
+        One of Status.PASS, Status.FAIL
     """
-    if similarity_pct >= PASS_THRESHOLD:
-        base_status = Status.PASS
-    elif similarity_pct >= REVIEW_THRESHOLD:
-        base_status = Status.REVIEW
-    else:
-        base_status = Status.FAIL
-
-    # Escalate to FAIL if GPT-4o signals high risk — regardless of base status.
-    # This catches cases where the pixel diff is small but the change is critical
-    # (e.g. axis labels truncated, chart type subtly changed).
-    if vision and vision.is_high_risk and base_status in (Status.PASS, Status.REVIEW):
-        logger.info(
-            "Status escalated %s → FAIL because GPT-4o flagged high risk",
-            base_status.upper(),
-        )
+    if vision.is_error_fallback:
+        logger.info("Status set to FAIL because GPT-4o call failed (error fallback)")
         return Status.FAIL
 
-    return base_status
+    # PASS = no parameter has status "fail" (ignored params don't count)
+    for param_key, status in vision.visual_parameters.items():
+        if status == "fail":
+            logger.info("Status set to FAIL: GPT-4o reports mismatch in '%s'", param_key)
+            return Status.FAIL
+
+    return Status.PASS
 
 
 def _build_visual_result(
     report_pair:  ReportPair,
-    pixel,
-    vision:       Optional[VisionAnalysis],
-    gpt4o_called: bool,
+    vision:       VisionAnalysis,
     status:       str,
+    parameters:   Optional[Dict[str, bool]] = None,
 ) -> VisualResult:
     """
-    Construct a VisualResult ORM object from pipeline outputs.
-    Keeps the pipeline function readable by isolating field mapping here.
+    Construct a VisualResult ORM object from GPT-4o pipeline outputs.
+    Pixel diff fields are left as None — visual comparison is semantic-only.
     """
     return VisualResult(
-        report_pair_id       = report_pair.id,
+        report_pair_id          = report_pair.id,
 
-        # Pixel diff metrics
-        pixel_similarity_pct = pixel.similarity_pct,
-        pixel_diff_count     = pixel.diff_pixel_count,
-        total_pixels         = pixel.total_pixels,
-        hash_distance        = pixel.hash_distance,
-        diff_image_path      = pixel.diff_image_path,
-        compared_width       = pixel.compared_width,
-        compared_height      = pixel.compared_height,
-        tableau_annotated_path  = pixel.tableau_annotated_path,
-        powerbi_annotated_path  = pixel.powerbi_annotated_path,
-        comparison_image_path   = pixel.comparison_image_path,
+        # Pixel diff fields — not used; set to None
+        pixel_similarity_pct    = None,
+        pixel_diff_count        = None,
+        total_pixels            = None,
+        hash_distance           = None,
+        diff_image_path         = None,
+        compared_width          = None,
+        compared_height         = None,
+        tableau_annotated_path  = None,
+        powerbi_annotated_path  = None,
+        comparison_image_path   = None,
 
-        # GPT-4o fields (None when GPT-4o was not called)
-        gpt4o_called       = gpt4o_called,
-        chart_type_match   = vision.chart_type_match   if vision else None,
-        color_scheme_match = vision.color_scheme_match if vision else None,
-        layout_match       = vision.layout_match       if vision else None,
-        axis_labels_match  = vision.axis_labels_match  if vision else None,
-        legend_match       = vision.legend_match       if vision else None,
-        title_match        = vision.title_match        if vision else None,
-        data_labels_match  = vision.data_labels_match  if vision else None,
-        ai_summary         = vision.summary            if vision else None,
-        ai_key_differences = json.dumps(list(vision.key_differences)) if vision else None,
-        ai_recommendation  = vision.recommendation     if vision else None,
-        ai_raw_response    = vision.raw_response       if vision else None,
-        gpt4o_risk_level   = vision.risk_level         if vision else None,
+        # GPT-4o fields — store "pass"/"fail"/"ignored" strings from structured result
+        gpt4o_called        = True,
+        chart_type_match    = vision.visual_parameters.get("chart_type", "ignored"),
+        color_scheme_match  = vision.visual_parameters.get("color", "ignored"),
+        layout_match        = vision.visual_parameters.get("layout", "ignored"),
+        axis_labels_match   = vision.visual_parameters.get("axis_labels", "ignored"),
+        axis_scale_match    = vision.visual_parameters.get("axis_scale", "ignored"),
+        legend_match        = vision.visual_parameters.get("legend", "ignored"),
+        title_match         = vision.visual_parameters.get("title", "ignored"),
+        data_labels_match   = vision.visual_parameters.get("data_labels", "ignored"),
+        text_content_match  = vision.visual_parameters.get("text_content", "ignored"),
+        ai_summary          = vision.summary,
+        ai_key_differences  = json.dumps(list(vision.differences)),
+        ai_recommendation   = vision.recommendation,
+        ai_raw_response     = vision.raw_response,
+        gpt4o_risk_level    = vision.risk_level,
 
-        status             = status,
-        pass_threshold_pct = PASS_THRESHOLD,
+        status              = status,
+        pass_threshold_pct  = None,
+        visual_parameters   = json.dumps(parameters) if parameters else None,
     )
 
 
 # ── Status promotion ───────────────────────────────────────────────────────────
 
-# Shared precedence map: ERROR > FAIL > REVIEW > PASS > PENDING
 _STATUS_PRECEDENCE: dict[str, int] = {
     Status.ERROR:   5,
     Status.FAIL:    4,
@@ -209,22 +168,17 @@ _STATUS_PRECEDENCE: dict[str, int] = {
 def _promote_pair_status(
     report_pair: ReportPair,
     new_status:  str,
-    vision:      Optional[VisionAnalysis],
+    vision:      VisionAnalysis,
 ) -> None:
     """
     Update report_pair.overall_status using worst-case precedence.
-
     Precedence: ERROR > FAIL > REVIEW > PASS > PENDING
-
-    overall_status only moves in the direction of greater severity —
-    a later PASS result never overwrites an earlier FAIL.
     """
     current_rank = _STATUS_PRECEDENCE.get(report_pair.overall_status, 0)
     new_rank     = _STATUS_PRECEDENCE.get(new_status, 0)
 
     if new_rank > current_rank:
         report_pair.overall_status = new_status
-        # Attach the risk level from GPT-4o when available.
         if vision:
             report_pair.overall_risk = vision.risk_level
 
@@ -239,18 +193,6 @@ def run_batch(
 ) -> list[VisualResult]:
     """
     Run visual validation for every ReportPair in the list.
-
-    Errors on individual pairs are caught so one bad screenshot does not
-    abort the whole batch.  Failed pairs receive an ERROR status record.
-
-    Args:
-        session:         SQLAlchemy-compatible session
-        report_pairs:    list of ReportPair objects to validate
-        openai_api_key:  OpenAI key; falls back to OPENAI_API_KEY in config/env
-        diff_output_dir: directory where diff PNGs will be saved
-
-    Returns:
-        List of VisualResult objects in the same order as report_pairs.
     """
     results: list[VisualResult] = []
     total = len(report_pairs)
@@ -279,13 +221,7 @@ def run_batch(
 
 
 def _log_batch_summary(results: list[VisualResult], total: int) -> None:
-    """Log a human-readable summary table after a batch run completes."""
-    counts = {
-        Status.PASS:   0,
-        Status.FAIL:   0,
-        Status.REVIEW: 0,
-        Status.ERROR:  0,
-    }
+    counts = {Status.PASS: 0, Status.FAIL: 0, Status.REVIEW: 0, Status.ERROR: 0}
     for r in results:
         if r.status in counts:
             counts[r.status] += 1
@@ -299,7 +235,6 @@ def _log_batch_summary(results: list[VisualResult], total: int) -> None:
     logger.info("  ERROR:  %d", counts[Status.ERROR])
     logger.info(separator)
 
-    # Also print to stdout for CI/CD pipeline visibility.
     print(f"\n{separator}")
     print(f"Batch complete: {total} reports")
     print(f"  PASS:   {counts[Status.PASS]}")

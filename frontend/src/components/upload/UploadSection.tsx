@@ -5,7 +5,19 @@ import { cn, formatBytes } from "@/lib/utils";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { UPLOAD_ZONES } from "@/constants";
-import type { UploadedFiles } from "@/types";
+import type { UploadedFiles, ExcludedParameters } from "@/types";
+
+const EXCLUSION_OPTIONS: { key: keyof ExcludedParameters; label: string }[] = [
+  { key: "color",        label: "Ignore Color Differences" },
+  { key: "legend",       label: "Ignore Legend Differences" },
+  { key: "axis_labels",  label: "Ignore Axis Labels" },
+  { key: "axis_scale",   label: "Ignore Axis Scale" },
+  { key: "title",        label: "Ignore Chart Title" },
+  { key: "data_labels",  label: "Ignore Data Labels" },
+  { key: "layout",       label: "Ignore Layout Differences" },
+  { key: "text_content", label: "Ignore Text Content" },
+  { key: "text_case",    label: "Ignore Text Case Differences" },
+];
 
 // ─── Zone Icons ───────────────────────────────────────────────────────────────
 
@@ -119,6 +131,8 @@ interface UploadSectionProps {
   onRemove: (id: keyof UploadedFiles) => void;
   onStart: () => void;
   loading?: boolean;
+  excludedParams: ExcludedParameters;
+  onExcludedParamsChange: (params: ExcludedParameters) => void;
 }
 
 export function UploadSection({
@@ -129,7 +143,12 @@ export function UploadSection({
   onRemove,
   onStart,
   loading = false,
+  excludedParams,
+  onExcludedParamsChange,
 }: UploadSectionProps) {
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const activeExclusionCount = Object.values(excludedParams).filter(Boolean).length;
+
   return (
     <Card>
       <CardHeader>
@@ -161,10 +180,81 @@ export function UploadSection({
         ))}
       </div>
 
+      {/* ── Advanced Filters ──────────────────────────────────────────────── */}
+      <div className="border-t border-zinc-100 mx-5 mb-4">
+        <button
+          onClick={() => setFiltersOpen(o => !o)}
+          className="flex items-center gap-2 py-3 text-xs font-semibold text-zinc-600 hover:text-zinc-900 transition-colors w-full text-left"
+        >
+          <svg
+            className={cn("w-3 h-3 transition-transform text-zinc-400", filtersOpen && "rotate-180")}
+            viewBox="0 0 12 12" fill="none"
+          >
+            <path d="M2 4l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Advanced Filters
+          {activeExclusionCount > 0 && (
+            <span className="ml-1 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[9px] font-bold">
+              {activeExclusionCount} excluded
+            </span>
+          )}
+        </button>
+
+        {filtersOpen && (
+          <div className="pb-4">
+            <p className="text-[10px] text-zinc-400 mb-3 font-medium uppercase tracking-wider">
+              Exclude from Visual Validation
+            </p>
+            <p className="text-[10px] text-zinc-400 mb-3">
+              Checked parameters will be ignored during visual comparison. Default is strict validation (nothing excluded).
+            </p>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2.5">
+              {EXCLUSION_OPTIONS.map(({ key, label }) => (
+                <label key={key} className="flex items-center gap-2.5 cursor-pointer group">
+                  <div
+                    className={cn(
+                      "w-4 h-4 rounded border-2 flex items-center justify-center transition-colors shrink-0",
+                      excludedParams[key]
+                        ? "bg-amber-500 border-amber-500"
+                        : "bg-white border-zinc-300 group-hover:border-zinc-400"
+                    )}
+                    onClick={() => onExcludedParamsChange({ ...excludedParams, [key]: !excludedParams[key] })}
+                  >
+                    {excludedParams[key] && (
+                      <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 12 12">
+                        <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    )}
+                  </div>
+                  <span className={cn(
+                    "text-[11px] font-medium",
+                    excludedParams[key] ? "text-amber-700" : "text-zinc-600"
+                  )}>
+                    {label}
+                  </span>
+                </label>
+              ))}
+            </div>
+            {activeExclusionCount > 0 && (
+              <button
+                onClick={() => onExcludedParamsChange(Object.fromEntries(
+                  Object.keys(excludedParams).map(k => [k, false])
+                ) as ExcludedParameters)}
+                className="mt-3 text-[10px] text-zinc-400 hover:text-zinc-600 underline"
+              >
+                Clear all exclusions
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className="px-5 pb-5 flex items-center justify-between">
         <p className="text-xs text-zinc-400">
           {isReady
-            ? "✓ Ready to run — all required files uploaded"
+            ? activeExclusionCount > 0
+              ? `✓ Ready — ${activeExclusionCount} parameter${activeExclusionCount !== 1 ? "s" : ""} excluded`
+              : "✓ Ready to run — all required files uploaded"
             : "Upload Tableau workbook + Power BI file to enable validation"}
         </p>
         <Button

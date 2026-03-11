@@ -356,30 +356,6 @@ export function useExportReport() {
           doc.text("VISUAL ANALYSIS", PAD, y);
           y += 10;
 
-          // Similarity bar
-          if (vis.pixelSimilarityPct !== undefined && vis.pixelSimilarityPct !== null) {
-            checkPage(28);
-            const simPct   = Math.max(0, Math.min(100, vis.pixelSimilarityPct));
-            const barW     = W - PAD * 2;
-            const filledW  = barW * (simPct / 100);
-            const barColor: [number,number,number] = simPct >= 95 ? [34, 197, 94] : simPct >= 75 ? [245, 158, 11] : [239, 68, 68];
-
-            // Label row
-            setFont(8, DARK);
-            doc.text("Pixel Similarity", PAD, y);
-            setFont(8, barColor, "bold");
-            doc.text(`${simPct.toFixed(1)}%`, W - PAD, y, { align: "right" });
-            y += 6;
-
-            // Track
-            doc.setFillColor(...LIGHT);
-            doc.roundedRect(PAD, y, barW, 7, 3, 3, "F");
-            // Fill
-            doc.setFillColor(...barColor);
-            doc.roundedRect(PAD, y, filledW, 7, 3, 3, "F");
-            y += 16;
-          }
-
           // AI summary
           if (vis.aiSummary) {
             const summaryLines: string[] = doc.splitTextToSize(`"${vis.aiSummary}"`, W - PAD * 2 - 24) as string[];
@@ -443,10 +419,10 @@ export function useExportReport() {
             y += 4;
           }
 
-          // Comparison image (full report card)
-          const compUrl  = resolveUrl(vis.comparisonImagePath);
-          const tabUrl   = resolveUrl(vis.tableauAnnotatedPath) || resolveUrl(pair.tableauScreenshot);
-          const pbiUrl   = resolveUrl(vis.powerbiAnnotatedPath) || resolveUrl(pair.powerBiScreenshot);
+          // Screenshot comparison — use the uploaded screenshots directly
+          const compUrl  = null; // pixel diff comparison image no longer used
+          const tabUrl   = resolveUrl(pair.tableauScreenshot);
+          const pbiUrl   = resolveUrl(pair.powerBiScreenshot);
 
           if (compUrl) {
             const img = await fetchBase64(compUrl);

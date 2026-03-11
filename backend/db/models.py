@@ -193,9 +193,11 @@ class VisualResult(Base):
     color_scheme_match: Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
     layout_match:       Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
     axis_labels_match:  Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    axis_scale_match:   Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
     legend_match:       Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
     title_match:        Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
     data_labels_match:  Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
+    text_content_match: Mapped[Optional[str]]  = mapped_column(String,  nullable=True)
     ai_summary:         Mapped[Optional[str]]  = mapped_column(Text,    nullable=True)
     ai_key_differences: Mapped[Optional[str]]  = mapped_column(Text,    nullable=True) # JSON list
     ai_recommendation:  Mapped[Optional[str]]  = mapped_column(Text,    nullable=True)
@@ -204,6 +206,7 @@ class VisualResult(Base):
     
     status:             Mapped[str]            = mapped_column(String,  nullable=False)
     pass_threshold_pct: Mapped[Optional[float]] = mapped_column(Float,  nullable=True)
+    visual_parameters:  Mapped[Optional[str]]  = mapped_column(Text,    nullable=True)  # JSON dict of param flags
     created_at:         Mapped[datetime]       = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     # Relationships
@@ -326,15 +329,18 @@ def _migrate_columns(engine) -> None:
             ("color_scheme_match",     "TEXT"),
             ("layout_match",           "TEXT"),
             ("axis_labels_match",      "TEXT"),
+            ("axis_scale_match",       "TEXT"),
             ("legend_match",           "TEXT"),
             ("title_match",            "TEXT"),
             ("data_labels_match",      "TEXT"),
+            ("text_content_match",     "TEXT"),
             ("ai_summary",             "TEXT"),
             ("ai_key_differences",     "TEXT"),
             ("ai_recommendation",      "TEXT"),
             ("ai_raw_response",        "TEXT"),
             ("gpt4o_risk_level",       "TEXT"),
             ("pass_threshold_pct",     "REAL"),
+            ("visual_parameters",      "TEXT"),
         ],
         "report_pair": [
             ("run_id", "INTEGER"),
