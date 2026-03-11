@@ -39,7 +39,8 @@ export function LayerDot({ status, label, className }: LayerDotProps) {
         className={cn("relative inline-flex items-center gap-1", className)}
         title="Screenshots not provided"
       >
-        <span className="text-[10px] text-slate-400 font-bold">—</span>
+        <span className="w-2 h-2 rounded-full bg-zinc-300 inline-block" />
+        {label && <span className="text-[10px] text-zinc-400">{label}</span>}
       </span>
     );
   }
