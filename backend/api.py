@@ -468,6 +468,9 @@ def _infer_semantic_status(sem) -> str:
     """Return the true layer-2 status, inferring from field data when stored status is PENDING."""
     if sem is None:
         return "skipped"
+    # Column value analysis overrides to FAIL if it found mismatches
+    if getattr(sem, "column_value_status", None) == "FAIL":
+        return "FAIL"
     s = (sem.status or "PENDING").upper()
     if s not in ("PENDING", ""):
         return s
@@ -590,6 +593,26 @@ async def list_report_pairs(
                         "layer": "L2"
                     })
 
+        # Layer 2: Semantic Model — column data content mismatches
+        if p.semantic_result and getattr(p.semantic_result, "column_value_status", None) == "FAIL":
+            try:
+                cv_details = json.loads(p.semantic_result.column_value_details or "[]")
+                for tbl in cv_details:
+                    if tbl.get("result") == "FAIL":
+                        mismatched = tbl.get("mismatched_columns", 0)
+                        total = tbl.get("columns_analyzed", 0)
+                        differences.append({
+                            "type": "Data Content Mismatch",
+                            "detail": (
+                                f"Table '{tbl.get('table_name', 'Unknown')}': "
+                                f"{mismatched}/{total} column(s) have value-set differences"
+                            ),
+                            "severity": "high",
+                            "layer": "L2"
+                        })
+            except Exception:
+                pass
+
         # Layer 3: Data
         if p.data_result:
             for t in p.data_result.table_comparisons:
@@ -630,7 +653,59 @@ async def list_report_pairs(
             "powerbiReportName": p.powerbi_report_name,
             "tableauScreenshot": get_screenshot_url(p.tableau_screenshot),
             "powerBiScreenshot": get_screenshot_url(p.powerbi_screenshot),
-            "createdAt": p.created_at.isoformat()
+            "createdAt": p.created_at.isoformat(),
+            "layer2Details": {
+                "columnValueStatus":  getattr(p.semantic_result, "column_value_status", None),
+                "columnValueDetails": [
+                    {
+                        "tableName":          tbl.get("table_name", "Unknown"),
+                        "pbixTableName":      tbl.get("pbix_name"),
+                        "result":             tbl.get("result", "SKIPPED"),
+                        "columnsAnalyzed":    tbl.get("columns_analyzed", 0),
+                        "mismatchedColumns":  tbl.get("mismatched_columns", 0),
+                        "failureReasons":     tbl.get("failure_reasons", []),
+                        "columnAnalyses": [
+                            {
+                                "columnName":          col.get("column_name"),
+                                "result":              col.get("result", "PASS"),
+                                "overlapPct":          col.get("overlap_pct", 100.0),
+                                "mismatchPct":         col.get("mismatch_pct", 0.0),
+                                "twbxUniqueCount":     col.get("twbx_unique_count", 0),
+                                "pbixUniqueCount":     col.get("pbix_unique_count", 0),
+                                "onlyInTwbx":          col.get("only_in_twbx", []),
+                                "onlyInPbix":          col.get("only_in_pbix", []),
+                                "onlyInTwbxCount":     col.get("only_in_twbx_count", 0),
+                                "onlyInPbixCount":     col.get("only_in_pbix_count", 0),
+                                "twbxPreviewTruncated": col.get("twbx_preview_truncated", False),
+                                "pbixPreviewTruncated": col.get("pbix_preview_truncated", False),
+                                "numericStats":        col.get("numeric_stats"),
+                            }
+                            for col in tbl.get("column_analyses", [])
+                        ],
+                    }
+                    for tbl in json.loads(
+                        getattr(p.semantic_result, "column_value_details", None) or "[]"
+                    )
+                ] if p.semantic_result else [],
+            } if p.semantic_result else None,
+            "layer3Details": [
+                {
+                    "tableName":            t.table_name,
+                    "result":               t.result,
+                    "matchMethod":          t.match_method,
+                    "rowCountTableau":      t.row_count_twbx,
+                    "rowCountPowerBi":      t.row_count_pbix,
+                    "rowCountDiffPct":      t.row_count_diff_pct,
+                    "columnCountTableau":   t.column_count_twbx,
+                    "columnCountPowerBi":   t.column_count_pbix,
+                    "columnsMatched":       json.loads(t.columns_matched or "[]"),
+                    "columnsMissingInPbi":  json.loads(t.columns_missing_in_pbix or "[]"),
+                    "columnsMissingInTwbx": json.loads(t.columns_missing_in_twbx or "[]"),
+                    "columnTypeMismatches": json.loads(t.column_type_mismatches or "[]"),
+                    "failureReasons":       t.failure_reasons.split(", ") if t.failure_reasons else [],
+                }
+                for t in (p.data_result.table_comparisons if p.data_result else [])
+            ] if p.data_result else [],
         })
     return output
 

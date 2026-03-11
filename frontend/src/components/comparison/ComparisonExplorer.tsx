@@ -1,20 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { StatusBadge, LayerDot } from "@/components/ui/Badge";
-import type {
-  ReportPair,
-  Difference,
-  ExcludedParameters,
-  CardVisibility,
-  LayerStatus,
-} from "@/types";
-import {
-  DEFAULT_EXCLUDED_PARAMS,
-  DEFAULT_CARD_VISIBILITY,
-  excludedToEnabled,
-} from "@/types";
+import type { ReportPair, Difference, TableDetail, TableTypeMismatch, TableColumnValueDetail, ColumnValueAnalysis, LayerStatus, ValidationStatus, ExcludedParameters, CardVisibility } from "@/types";
+import { DEFAULT_EXCLUDED_PARAMS, excludedToEnabled, DEFAULT_CARD_VISIBILITY } from "@/types";
 
 const resolvePath = (path: string | undefined | null) => {
   if (!path) return undefined;
@@ -41,6 +31,39 @@ function getDiffLabel(type: string, detail: string): string {
     return "Visual Difference";
   }
   return type;
+}
+
+// ── Helper functions ──────────────────────────────────────────────────────────
+
+function deriveParamResults(
+  vis: ReportPair["visualResult"] | null,
+  excluded: ExcludedParameters,
+): Record<string, string> | null {
+  if (!vis) return null;
+  const matchMap: Record<string, boolean | undefined> = {
+    chart_type:   vis.chartTypeMatch,
+    color:        vis.colorSchemeMatch,
+    legend:       vis.legendMatch,
+    axis_labels:  vis.axisLabelsMatch,
+    axis_scale:   undefined,
+    title:        vis.titleMatch,
+    data_labels:  vis.dataLabelsMatch,
+    layout:       vis.layoutMatch,
+    text_content: undefined,
+  };
+  const result: Record<string, string> = {};
+  for (const key of Object.keys(PARAM_RESULT_LABELS)) {
+    if (excluded[key as keyof ExcludedParameters]) {
+      result[key] = "ignored";
+    } else if (matchMap[key] === true) {
+      result[key] = "pass";
+    } else if (matchMap[key] === false) {
+      result[key] = "fail";
+    } else {
+      result[key] = "skipped";
+    }
+  }
+  return result;
 }
 
 // ── Parameter exclusion config ────────────────────────────────────────────────
@@ -71,56 +94,10 @@ const PARAM_RESULT_LABELS: Record<string, string> = {
 };
 
 const LAYER_META = {
-  L1: { bg: "bg-blue-50",   border: "border-blue-200",   dot: "bg-blue-500",   pill: "bg-blue-100 text-blue-700",     name: "Visual"   },
+  L1: { bg: "bg-blue-50", border: "border-blue-200", dot: "bg-blue-500", pill: "bg-blue-100 text-blue-700", name: "Visual" },
   L2: { bg: "bg-violet-50", border: "border-violet-200", dot: "bg-violet-500", pill: "bg-violet-100 text-violet-700", name: "Semantic" },
-  L3: { bg: "bg-rose-50",   border: "border-rose-200",   dot: "bg-rose-500",   pill: "bg-rose-100 text-rose-700",     name: "Data"     },
+  L3: { bg: "bg-rose-50", border: "border-rose-200", dot: "bg-rose-500", pill: "bg-rose-100 text-rose-700", name: "Data" },
 } as const;
-
-/**
- * Derive per-parameter statuses from GPT-structured results or legacy booleans.
- *
- * Priority:
- *  1. vis.parameterResults  — "pass"/"fail"/"ignored" strings from GPT (new format)
- *  2. vis boolean match fields — legacy fallback
- *
- * User exclusion overrides are applied on top in both cases.
- */
-function deriveParamResults(
-  vis: ReportPair["visualResult"] | null,
-  excluded: ExcludedParameters,
-): Record<string, string> | null {
-  if (!vis || !vis.gpt4oCalled) return null;
-
-  // New format: use pre-computed parameterResults from the backend
-  if (vis.parameterResults) {
-    const base: Record<string, string> = Object.fromEntries(
-      Object.entries(vis.parameterResults)
-    );
-    // Apply user exclusion overrides on top
-    for (const key of Object.keys(excluded) as (keyof ExcludedParameters)[]) {
-      if (excluded[key] && key in base) base[key as string] = "ignored";
-    }
-    return base;
-  }
-
-  // Legacy fallback: derive from individual boolean match properties
-  const s = (match: boolean | undefined | null, key: keyof ExcludedParameters): string => {
-    if (excluded[key]) return "ignored";
-    if (match === undefined || match === null) return "skipped";
-    return match ? "pass" : "fail";
-  };
-  return {
-    chart_type:   s(vis.chartTypeMatch,    "chart_type"),
-    color:        s(vis.colorSchemeMatch,  "color"),
-    legend:       s(vis.legendMatch,       "legend"),
-    axis_labels:  s(vis.axisLabelsMatch,   "axis_labels"),
-    axis_scale:   s(vis.axisScaleMatch,    "axis_scale"),
-    title:        s(vis.titleMatch,        "title"),
-    data_labels:  s(vis.dataLabelsMatch,   "data_labels"),
-    layout:       s(vis.layoutMatch,       "layout"),
-    text_content: s(vis.textContentMatch,  "text_content"),
-  };
-}
 
 interface ComparisonExplorerProps {
   pairs: ReportPair[];
@@ -184,6 +161,433 @@ function StatusPill({ status }: { status: string }) {
     )}>
       {status}
     </span>
+  );
+}
+
+function Chip({ label, color }: { label: string; color: string }) {
+  return (
+    <span className={cn("inline-flex items-center px-1.5 py-0.5 rounded border text-[9px] font-medium", color)}>
+      {label}
+    </span>
+  );
+}
+
+// ── Column Schema Analysis Component (L3) ─────────────────────────────────────
+
+function ColumnSchemaAnalysis({ details }: { details: TableDetail[] }) {
+  const [openTables, setOpenTables] = useState<Set<string>>(new Set());
+
+  const toggleTable = (name: string) =>
+    setOpenTables(prev => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
+
+  const failCount = details.filter(d => d.result === "FAIL").length;
+
+  return (
+    <div className="bg-white border border-rose-200 rounded-2xl shadow-sm overflow-hidden">
+      <div className="px-5 py-4 border-b border-rose-100 flex items-center justify-between bg-rose-50/40">
+        <div>
+          <div className="flex items-center gap-2">
+            <h4 className="text-sm font-semibold text-zinc-900">Column Schema Analysis</h4>
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-700 uppercase tracking-wide">
+              L3 · Data
+            </span>
+          </div>
+          <p className="text-[10px] text-zinc-400 mt-0.5">Row / column count comparison and schema diff across matched tables</p>
+        </div>
+        <span className={cn(
+          "text-[10px] font-bold px-2.5 py-1 rounded-full border",
+          failCount === 0 ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-red-50 text-red-600 border-red-200"
+        )}>
+          {failCount === 0 ? `${details.length} Passed` : `${failCount} / ${details.length} Failed`}
+        </span>
+      </div>
+
+      <div className="divide-y divide-rose-100">
+        {details.map(t => {
+          const isOpen = openTables.has(t.tableName);
+          const isFail = t.result === "FAIL";
+          return (
+            <div key={t.tableName} className={cn(isFail ? "bg-red-50/20" : "bg-white")}>
+              <button
+                onClick={() => toggleTable(t.tableName)}
+                className="w-full text-left px-5 py-3 flex items-center gap-3 hover:bg-rose-50/40 transition-colors"
+              >
+                <svg className={cn("w-3 h-3 text-zinc-400 shrink-0 transition-transform", isOpen && "rotate-90")}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+                <span className="text-[11px] font-semibold text-zinc-800 flex-1 truncate">{t.tableName}</span>
+                {t.matchMethod && (
+                  <span className="text-[9px] text-zinc-400 shrink-0">{t.matchMethod}</span>
+                )}
+                <span className={cn(
+                  "text-[9px] font-bold px-1.5 py-0.5 rounded-full border uppercase tracking-wide shrink-0",
+                  isFail ? "bg-red-50 text-red-600 border-red-200" : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                )}>{t.result}</span>
+              </button>
+
+              {isOpen && (
+                <div className="px-5 pb-4 space-y-3">
+                  {/* Row / column counts */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {[
+                      { label: "Tableau Rows",   value: t.rowCountTableau    != null ? t.rowCountTableau.toLocaleString()    : "—" },
+                      { label: "Power BI Rows",  value: t.rowCountPowerBi    != null ? t.rowCountPowerBi.toLocaleString()    : "—" },
+                      { label: "Tableau Cols",   value: t.columnCountTableau != null ? t.columnCountTableau.toLocaleString() : "—" },
+                      { label: "Power BI Cols",  value: t.columnCountPowerBi != null ? t.columnCountPowerBi.toLocaleString() : "—" },
+                    ].map(s => (
+                      <div key={s.label} className="bg-zinc-50 border border-zinc-100 rounded-xl p-2.5">
+                        <p className="text-[9px] text-zinc-400 uppercase tracking-wide">{s.label}</p>
+                        <p className="text-sm font-bold mt-0.5 text-zinc-800 tabular-nums">{s.value}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Missing columns */}
+                  {(t.columnsMissingInPbi.length > 0 || t.columnsMissingInTwbx.length > 0) && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {t.columnsMissingInPbi.length > 0 && (
+                        <div>
+                          <p className="text-[10px] font-bold text-rose-600 mb-1.5 uppercase tracking-wide">Missing in Power BI</p>
+                          <div className="flex flex-wrap gap-1">
+                            {t.columnsMissingInPbi.map((c, i) => (
+                              <Chip key={i} label={c} color="bg-rose-50 text-rose-700 border-rose-200" />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {t.columnsMissingInTwbx.length > 0 && (
+                        <div>
+                          <p className="text-[10px] font-bold text-blue-600 mb-1.5 uppercase tracking-wide">Missing in Tableau</p>
+                          <div className="flex flex-wrap gap-1">
+                            {t.columnsMissingInTwbx.map((c, i) => (
+                              <Chip key={i} label={c} color="bg-blue-50 text-blue-700 border-blue-200" />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Type mismatches */}
+                  {t.columnTypeMismatches && t.columnTypeMismatches.length > 0 && (
+                    <div>
+                      <p className="text-[10px] font-bold text-amber-600 mb-1.5 uppercase tracking-wide">Type Mismatches</p>
+                      <div className="rounded-xl border border-zinc-200 overflow-hidden">
+                        <table className="w-full text-[11px]">
+                          <thead>
+                            <tr className="bg-zinc-50 border-b border-zinc-200">
+                              <th className="px-3 py-2 text-left font-semibold text-zinc-600">Column</th>
+                              <th className="px-3 py-2 text-center font-semibold text-blue-600">Tableau</th>
+                              <th className="px-3 py-2 text-center font-semibold text-violet-600">Power BI</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-zinc-100">
+                            {t.columnTypeMismatches.map((m: TableTypeMismatch, i: number) => (
+                              <tr key={i} className="bg-amber-50/30">
+                                <td className="px-3 py-2 font-mono text-[10px] text-zinc-800">{m.column}</td>
+                                <td className="px-3 py-2 text-center text-blue-700">{m.twbxCanonical}</td>
+                                <td className="px-3 py-2 text-center text-violet-700">{m.pbiCanonical}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Failure reasons */}
+                  {t.failureReasons.length > 0 && (
+                    <div className="space-y-1">
+                      {t.failureReasons.map((r, i) => (
+                        <p key={i} className="text-[10px] text-red-600 flex gap-1.5 items-start">
+                          <span className="mt-0.5 shrink-0">•</span><span>{r}</span>
+                        </p>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* All clear */}
+                  {!isFail && (
+                    <div className="flex items-center gap-2 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-xl px-3 py-2">
+                      <span>✅</span><span>Schema matches between Tableau and Power BI.</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Column Data Content Analysis Component (L2) ────────────────────────────────
+
+function OverlapBar({ pct }: { pct: number }) {
+  const color = pct >= 100 ? "bg-emerald-500" : pct >= 80 ? "bg-amber-400" : "bg-red-500";
+  return (
+    <div className="flex items-center gap-2 min-w-0">
+      <div className="flex-1 h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+        <div className={cn("h-full rounded-full transition-all", color)} style={{ width: `${Math.min(pct, 100)}%` }} />
+      </div>
+      <span className={cn(
+        "text-[10px] font-bold tabular-nums shrink-0 w-10 text-right",
+        pct >= 100 ? "text-emerald-600" : pct >= 80 ? "text-amber-600" : "text-red-600"
+      )}>
+        {pct.toFixed(1)}%
+      </span>
+    </div>
+  );
+}
+
+function ColumnValueAnalysisPanel({ details }: { details: TableColumnValueDetail[] }) {
+  const [openColumns, setOpenColumns] = useState<Set<string>>(new Set());
+
+  const toggleColumn = (key: string) =>
+    setOpenColumns(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+
+  const activeTables = details.filter(d => d.result !== "SKIPPED");
+  const failCount = activeTables.filter(d => d.result === "FAIL").length;
+  const totalMismatched = activeTables.reduce((s, d) => s + (d.mismatchedColumns ?? 0), 0);
+  const totalAnalyzed = activeTables.reduce((s, d) => s + (d.columnsAnalyzed ?? 0), 0);
+  const matchRate = totalAnalyzed > 0
+    ? (((totalAnalyzed - totalMismatched) / totalAnalyzed) * 100).toFixed(1)
+    : "—";
+
+  return (
+    <div className="bg-white border border-violet-200 rounded-2xl shadow-sm overflow-hidden">
+      {/* Header */}
+      <div className="px-5 py-4 border-b border-violet-100 bg-violet-50/40">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <h4 className="text-sm font-semibold text-zinc-900">Column Data Content Analysis</h4>
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 uppercase tracking-wide">
+              L2 · Semantic
+            </span>
+          </div>
+          <span className={cn(
+            "text-[10px] font-bold px-2.5 py-1 rounded-full border",
+            failCount === 0
+              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+              : "bg-red-50 text-red-600 border-red-200"
+          )}>
+            {failCount === 0
+              ? `${activeTables.length} table${activeTables.length !== 1 ? "s" : ""} passed`
+              : `${failCount} / ${activeTables.length} table${activeTables.length !== 1 ? "s" : ""} failed`}
+          </span>
+        </div>
+
+        {/* Summary stat cards */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {[
+            { label: "Tables Analyzed",   value: String(activeTables.length),  color: "text-zinc-800" },
+            { label: "Columns Analyzed",  value: String(totalAnalyzed),        color: "text-zinc-800" },
+            { label: "Mismatched Columns",value: String(totalMismatched),      color: totalMismatched > 0 ? "text-red-600" : "text-emerald-600" },
+            { label: "Overall Match Rate",value: `${matchRate}%`,              color: totalMismatched === 0 ? "text-emerald-600" : "text-amber-600" },
+          ].map(s => (
+            <div key={s.label} className="bg-white border border-violet-100 rounded-xl px-3 py-2.5">
+              <p className="text-[9px] text-zinc-400 uppercase tracking-wide">{s.label}</p>
+              <p className={cn("text-base font-bold mt-0.5 tabular-nums", s.color)}>{s.value}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Single flat statistics table */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11px]">
+          <thead>
+            <tr className="bg-zinc-50 border-y border-zinc-200">
+              <th className="px-3 py-2 text-left font-semibold text-zinc-500 whitespace-nowrap">Table</th>
+              <th className="px-3 py-2 text-left font-semibold text-zinc-500 whitespace-nowrap">Column</th>
+              <th className="px-3 py-2 text-center font-semibold text-blue-600 whitespace-nowrap">Tableau Unique</th>
+              <th className="px-3 py-2 text-center font-semibold text-violet-600 whitespace-nowrap">Power BI Unique</th>
+              <th className="px-3 py-2 text-center font-semibold text-orange-600 whitespace-nowrap">Δ Tableau only</th>
+              <th className="px-3 py-2 text-center font-semibold text-fuchsia-600 whitespace-nowrap">Δ Power BI only</th>
+              <th className="px-3 py-2 text-left font-semibold text-zinc-500 whitespace-nowrap w-36">Value Overlap</th>
+              <th className="px-3 py-2 text-center font-semibold text-zinc-500 whitespace-nowrap">Match</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
+            {activeTables.length === 0 ? (
+              <tr>
+                <td colSpan={8} className="px-5 py-6 text-center text-[11px] text-zinc-400 italic">
+                  No active table data available.
+                </td>
+              </tr>
+            ) : activeTables.flatMap(t =>
+              t.columnAnalyses.length > 0
+                ? t.columnAnalyses.map((col: ColumnValueAnalysis) => {
+                    const colKey = `${t.tableName}:${col.columnName}`;
+                    const colOpen = openColumns.has(colKey);
+                    const hasDiff = col.result === "FAIL";
+                    return (
+                      <React.Fragment key={colKey}>
+                        <tr
+                          className={cn(
+                            "transition-colors",
+                            hasDiff ? "bg-red-50/40 hover:bg-red-50/70 cursor-pointer" : "bg-white hover:bg-zinc-50/60"
+                          )}
+                          onClick={() => hasDiff && toggleColumn(colKey)}
+                        >
+                          <td className="px-3 py-2 font-mono text-[10px] text-zinc-500 whitespace-nowrap max-w-[120px] truncate" title={t.tableName}>
+                            {t.tableName}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-[10px] font-medium text-zinc-800 whitespace-nowrap">
+                            {hasDiff && (
+                              <svg
+                                className={cn("inline w-2.5 h-2.5 mr-1 text-zinc-400 transition-transform", colOpen && "rotate-90")}
+                                fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}
+                              >
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                              </svg>
+                            )}
+                            {col.columnName}
+                          </td>
+                          <td className="px-3 py-2 text-center text-blue-700 font-semibold tabular-nums">
+                            {col.twbxUniqueCount.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-center text-violet-700 font-semibold tabular-nums">
+                            {col.pbixUniqueCount.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-center tabular-nums">
+                            {col.onlyInTwbxCount > 0
+                              ? <span className="font-semibold text-orange-600">+{col.onlyInTwbxCount.toLocaleString()}</span>
+                              : <span className="text-zinc-300">—</span>}
+                          </td>
+                          <td className="px-3 py-2 text-center tabular-nums">
+                            {col.onlyInPbixCount > 0
+                              ? <span className="font-semibold text-fuchsia-600">+{col.onlyInPbixCount.toLocaleString()}</span>
+                              : <span className="text-zinc-300">—</span>}
+                          </td>
+                          <td className="px-3 py-2 w-36">
+                            <OverlapBar pct={col.overlapPct} />
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            {hasDiff
+                              ? <span className="text-[9px] font-bold text-red-600 px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200">FAIL</span>
+                              : <span className="text-[9px] font-bold text-emerald-600 px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200">PASS</span>
+                            }
+                          </td>
+                        </tr>
+
+                        {/* Expanded diff row */}
+                        {colOpen && hasDiff && (
+                          <tr key={`${colKey}-detail`}>
+                            <td colSpan={8} className="px-5 pb-4 pt-2 bg-zinc-50/80 border-b border-zinc-200">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div>
+                                  <p className="text-[10px] font-bold text-blue-700 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                                    <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded-full text-[8px]">Tableau only</span>
+                                    <span className="text-zinc-400 font-normal text-[9px]">
+                                      {col.onlyInTwbxCount} value{col.onlyInTwbxCount !== 1 ? "s" : ""}
+                                      {col.twbxPreviewTruncated ? " (preview)" : ""}
+                                    </span>
+                                  </p>
+                                  {col.onlyInTwbxCount > 0 ? (
+                                    <div className="flex flex-wrap gap-1">
+                                      {col.onlyInTwbx.map((v, i) => (
+                                        <Chip key={i} label={v} color="bg-blue-50 text-blue-700 border-blue-200" />
+                                      ))}
+                                      {col.twbxPreviewTruncated && (
+                                        <span className="text-[9px] text-zinc-400 italic self-center">…and more</span>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span className="text-[10px] text-zinc-400 italic">None</span>
+                                  )}
+                                </div>
+
+                                <div>
+                                  <p className="text-[10px] font-bold text-fuchsia-700 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                                    <span className="px-1.5 py-0.5 bg-fuchsia-100 text-fuchsia-700 rounded-full text-[8px]">Power BI only</span>
+                                    <span className="text-zinc-400 font-normal text-[9px]">
+                                      {col.onlyInPbixCount} value{col.onlyInPbixCount !== 1 ? "s" : ""}
+                                      {col.pbixPreviewTruncated ? " (preview)" : ""}
+                                    </span>
+                                  </p>
+                                  {col.onlyInPbixCount > 0 ? (
+                                    <div className="flex flex-wrap gap-1">
+                                      {col.onlyInPbix.map((v, i) => (
+                                        <Chip key={i} label={v} color="bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200" />
+                                      ))}
+                                      {col.pbixPreviewTruncated && (
+                                        <span className="text-[9px] text-zinc-400 italic self-center">…and more</span>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span className="text-[10px] text-zinc-400 italic">None</span>
+                                  )}
+                                </div>
+
+                                {col.numericStats && (
+                                  <div className="sm:col-span-2">
+                                    <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wide mb-2">Numeric Statistics</p>
+                                    <table className="w-full text-[10px] border border-zinc-200 rounded-lg overflow-hidden">
+                                      <thead>
+                                        <tr className="bg-zinc-100 border-b border-zinc-200">
+                                          <th className="px-3 py-1.5 text-left font-semibold text-zinc-500">Source</th>
+                                          {(["mean", "std", "min", "max"] as const).map(s => (
+                                            <th key={s} className="px-3 py-1.5 text-center font-semibold text-zinc-500 uppercase">{s}</th>
+                                          ))}
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-zinc-100">
+                                        <tr className="bg-blue-50/40">
+                                          <td className="px-3 py-1.5 font-semibold text-blue-700">Tableau</td>
+                                          {(["mean", "std", "min", "max"] as const).map(s => (
+                                            <td key={s} className="px-3 py-1.5 text-center text-blue-700 tabular-nums font-medium">
+                                              {col.numericStats!.twbx[s] != null ? Number(col.numericStats!.twbx[s]).toLocaleString(undefined, { maximumFractionDigits: 4 }) : "—"}
+                                            </td>
+                                          ))}
+                                        </tr>
+                                        <tr className="bg-fuchsia-50/40">
+                                          <td className="px-3 py-1.5 font-semibold text-fuchsia-700">Power BI</td>
+                                          {(["mean", "std", "min", "max"] as const).map(s => (
+                                            <td key={s} className="px-3 py-1.5 text-center text-fuchsia-700 tabular-nums font-medium">
+                                              {col.numericStats!.pbix[s] != null ? Number(col.numericStats!.pbix[s]).toLocaleString(undefined, { maximumFractionDigits: 4 }) : "—"}
+                                            </td>
+                                          ))}
+                                        </tr>
+                                      </tbody>
+                                    </table>
+                                    {col.numericStats.mean_diff_pct != null && (
+                                      <p className="text-[9px] text-zinc-500 mt-1.5">
+                                        Mean difference: <span className="font-semibold text-red-600">{col.numericStats.mean_diff_pct.toFixed(2)}%</span>
+                                      </p>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })
+                : [
+                    <tr key={`${t.tableName}-empty`}>
+                      <td className="px-3 py-2 font-mono text-[10px] text-zinc-500 whitespace-nowrap">{t.tableName}</td>
+                      <td colSpan={7} className="px-3 py-3 text-[11px] text-zinc-400 italic">
+                        No column-level data available — the backend did not return column analyses for this table.
+                      </td>
+                    </tr>
+                  ]
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -310,7 +714,7 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
   // Effective overall status — recomputed from current layer results so that
   // parameter exclusions propagate to the header badge, sidebar, and dashboard
   // without waiting for the next full page reload.
-  const effectiveOverallStatus: string = (() => {
+  const effectiveOverallStatus: ValidationStatus = (() => {
     const l1 = effectiveL1Status;
     const l2 = pair?.layer2Status ?? "skipped";
     const l3 = pair?.layer3Status ?? "skipped";
@@ -417,8 +821,8 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
                       l.status === "skipped"
                         ? "bg-zinc-50 border-zinc-200 text-zinc-400"
                         : l.status?.toUpperCase() === "PASS"
-                        ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-                        : "bg-red-50 border-red-200 text-red-600";
+                          ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+                          : "bg-red-50 border-red-200 text-red-600";
                     return (
                       <div key={l.key} className={cn(
                         "flex items-center gap-1 px-2 py-1 rounded-lg border text-[9px] font-bold uppercase",
@@ -478,6 +882,11 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
                       checked={cards.visualBreakdown}
                       onChange={() => toggleCard("visualBreakdown")}
                       label="Visual Comparison Breakdown"
+                    />
+                    <Checkbox
+                      checked={cards.columnDataContent}
+                      onChange={() => toggleCard("columnDataContent")}
+                      label="Column Data Content"
                     />
                     <Checkbox
                       checked={cards.regressionLog}
@@ -635,24 +1044,25 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
               </div>
             )}
 
-            {/* ── Visual Comparison (always visible — screenshots + AI analysis) ── */}
-            {(vis || pair.tableauScreenshot || pair.powerBiScreenshot) && (
+            {/* ── Visual Comparison (toggleable — screenshots + AI analysis) ── */}
+            {cards.visualBreakdown && (vis || pair.tableauScreenshot || pair.powerBiScreenshot) && (
               <div className="bg-white border border-zinc-200 rounded-2xl shadow-sm overflow-hidden">
                 <div className="px-5 py-4 border-b border-zinc-100 flex items-center justify-between">
                   <div>
                     <h4 className="text-sm font-semibold text-zinc-900">Visual Comparison</h4>
                     <p className="text-[10px] text-zinc-400 mt-0.5">Side-by-side screenshot comparison with AI analysis</p>
                   </div>
-                  {/* Risk level badge */}
-                  {(liveResult?.gpt4oRiskLevel ?? vis?.gpt4oRiskLevel) && (
-                    <span className={cn(
-                      "text-[8px] font-bold px-2 py-1 rounded-full border uppercase",
-                      (liveResult?.gpt4oRiskLevel ?? vis?.gpt4oRiskLevel) === "high"   ? "text-red-600 bg-red-50 border-red-200" :
-                      (liveResult?.gpt4oRiskLevel ?? vis?.gpt4oRiskLevel) === "medium" ? "text-amber-600 bg-amber-50 border-amber-200" :
-                      "text-emerald-600 bg-emerald-50 border-emerald-200"
-                    )}>
-                      {liveResult?.gpt4oRiskLevel ?? vis?.gpt4oRiskLevel} risk
-                    </span>
+                  {vis?.gpt4oRiskLevel && (
+                    <div className="text-right">
+                      <p className="text-[10px] text-zinc-400">Risk Level</p>
+                      <p className={cn(
+                        "text-sm font-bold mt-0.5 uppercase tracking-wide",
+                        vis.gpt4oRiskLevel === "low"    ? "text-emerald-600" :
+                        vis.gpt4oRiskLevel === "medium" ? "text-amber-500"   : "text-red-500"
+                      )}>
+                        {vis.gpt4oRiskLevel}
+                      </p>
+                    </div>
                   )}
                 </div>
 
@@ -739,7 +1149,7 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
               </div>
             )}
 
-            {!vis && !pair.tableauScreenshot && !pair.powerBiScreenshot && (
+            {cards.visualBreakdown && !vis && !pair.tableauScreenshot && !pair.powerBiScreenshot && (
               <div className="bg-white border border-zinc-200 rounded-2xl shadow-sm p-5 flex items-center gap-4">
                 <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-xl shrink-0">🖼️</div>
                 <div>
@@ -747,6 +1157,30 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
                   <p className="text-[11px] text-slate-400 mt-0.5">Upload Tableau and Power BI screenshots to enable visual comparison.</p>
                 </div>
               </div>
+            )}
+
+            {/* ── Column Data Content Analysis (L2) ───────────────────────── */}
+            {cards.columnDataContent && (
+              pair.layer2Details?.columnValueDetails && pair.layer2Details.columnValueDetails.filter(d => d.result !== "SKIPPED").length > 0 ? (
+                <ColumnValueAnalysisPanel details={pair.layer2Details.columnValueDetails} />
+              ) : (
+                <div className="bg-white border border-violet-200 rounded-2xl shadow-sm overflow-hidden">
+                  <div className="px-5 py-4 bg-violet-50/40 flex items-center gap-4">
+                    <div className="w-9 h-9 rounded-full bg-violet-100 flex items-center justify-center text-base shrink-0">📊</div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <p className="text-xs font-semibold text-zinc-700">Column Data Content Analysis</p>
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 uppercase tracking-wide">L2 · Semantic</span>
+                      </div>
+                      <p className="text-[11px] text-zinc-400 mt-0.5">
+                        {pair.layer2Details
+                          ? "No matched table pairs found — re-run validation to generate a data content report."
+                          : "Run a new validation to see column-level data value comparison between Tableau and Power BI."}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )
             )}
 
             {/* ── Regression Log (toggleable) ───────────────────────────── */}

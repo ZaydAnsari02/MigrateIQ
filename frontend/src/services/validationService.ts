@@ -73,6 +73,39 @@ export interface BackendResult {
         data_type_mismatches: any[];
         failure_reasons: string[];
       };
+      column_value_analysis?: {
+        result: "PASS" | "FAIL";
+        tables_analyzed: number;
+        tables_with_mismatches: number;
+        details: Array<{
+          table_name: string;
+          pbix_name?: string;
+          result: "PASS" | "FAIL" | "SKIPPED";
+          columns_analyzed: number;
+          mismatched_columns: number;
+          failure_reasons: string[];
+          column_analyses: Array<{
+            column_name: string;
+            result: "PASS" | "FAIL";
+            overlap_pct: number;
+            mismatch_pct: number;
+            twbx_unique_count: number;
+            pbix_unique_count: number;
+            only_in_twbx: string[];
+            only_in_pbix: string[];
+            only_in_twbx_count: number;
+            only_in_pbix_count: number;
+            twbx_preview_truncated: boolean;
+            pbix_preview_truncated: boolean;
+            numeric_stats?: {
+              twbx: { mean: number | null; std: number | null; min: number | null; max: number | null };
+              pbix: { mean: number | null; std: number | null; min: number | null; max: number | null };
+              mean_diff: number | null;
+              mean_diff_pct: number | null;
+            };
+          }>;
+        }>;
+      };
     };
     relationships: {
       result: "PASS" | "FAIL";
@@ -115,13 +148,22 @@ export interface BackendResult {
 export interface BackendCheckDetail {
   table_name: string;
   result: "PASS" | "FAIL" | "WARNING";
+  match_method?: string;
   row_count_twbx?: number | null;
   row_count_pbix?: number | null;
   row_count_diff_pct?: number | null;
-  columns_matched?: any[];
-  columns_missing_in_pbix?: any[];
-  columns_missing_in_twbx?: any[];
-  column_type_mismatches?: any[];
+  column_count_twbx?: number | null;
+  column_count_pbix?: number | null;
+  columns_matched?: string[];
+  columns_missing_in_pbix?: string[];
+  columns_missing_in_twbx?: string[];
+  column_type_mismatches?: Array<{
+    column: string;
+    twbx_type: string;
+    pbix_type: string;
+    twbx_canonical: string;
+    pbix_canonical: string;
+  }>;
   failure_reasons: string[];
 }
 

@@ -157,6 +157,12 @@ def compare_reports(
             twbx_tables, pbix_tables, verbose=verbose
         )
 
+        # ── Analyse column data content (L2) ────────────────────────────
+        logger.info("Analysing column data content...")
+        column_value_result, column_value_details = data_comparator.analyze_column_data(
+            twbx_tables, pbix_tables, verbose=verbose
+        )
+
         # ── Compare semantic model ───────────────────────────────────────
         logger.info("Comparing semantic model...")
         model_comparator = ModelComparator()
@@ -183,14 +189,16 @@ def compare_reports(
             model_details,
             relationships_result,
             relationships_details,
+            column_value_result=column_value_result,
+            column_value_details=column_value_details,
             tolerance_pct=data_comparator.tolerance_pct,
         )
 
         # ── Resolve output path and save ─────────────────────────────────
         # Determine overall result explicitly
         overall_status = "PASS"
-        if data_result == "FAIL" or model_result == "FAIL" or relationships_result == "FAIL":
-                overall_status = "FAIL"
+        if data_result == "FAIL" or model_result == "FAIL" or relationships_result == "FAIL" or column_value_result == "FAIL":
+            overall_status = "FAIL"
 
         # Use API-provided output path if available
         if output_path:

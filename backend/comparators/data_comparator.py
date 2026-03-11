@@ -382,6 +382,217 @@ class DataComparator:
         return result
 
     # ------------------------------------------------------------------
+    # Column Data Content Analysis  (L2 – semantic layer)
+    # ------------------------------------------------------------------
+
+    def analyze_column_data(
+        self,
+        twbx_tables: Dict[str, pd.DataFrame],
+        pbix_tables: Dict[str, pd.DataFrame],
+        max_unique: int = 500,
+        overlap_threshold_pct: float = 100.0,
+        verbose: bool = False,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """
+        Analyse actual data values in matched columns across matched tables.
+
+        For every column that exists in both Tableau and Power BI this method
+        computes:
+          • The unique-value sets in each source (capped at max_unique to
+            protect memory on large tables).
+          • Values present only in Tableau, and values present only in Power BI.
+          • An overlap percentage — 100 % means the value sets are identical.
+          • For numeric columns: mean / std / min / max comparison.
+
+        A column is flagged FAIL when overlap_pct < overlap_threshold_pct
+        (default 100 %, so any value-set difference is surfaced).
+
+        This method re-uses the same `_match_tables()` helper as
+        `compare_tables()` but is otherwise completely independent of it —
+        calling `analyze_column_data()` does NOT alter the L3 structural
+        comparison in any way.
+
+        Returns:
+            (overall_result, list_of_per_table_results)
+        """
+        results: List[Dict[str, Any]] = []
+        all_pass = True
+
+        table_matches = _match_tables(twbx_tables, pbix_tables)
+
+        for match in table_matches:
+            twbx_name = match["twbx_name"]
+            pbix_name  = match["pbix_name"]
+
+            # Skip tables that could not be paired
+            if match["match_method"] == "unmatched":
+                display = twbx_name or pbix_name or "Unknown"
+                results.append({
+                    "table_name": display,
+                    "twbx_name": twbx_name,
+                    "pbix_name": pbix_name,
+                    "result": "SKIPPED",
+                    "reason": match["name_note"],
+                    "column_analyses": [],
+                    "columns_analyzed": 0,
+                    "mismatched_columns": 0,
+                    "failure_reasons": [match["name_note"]],
+                })
+                continue
+
+            twbx_df = twbx_tables[twbx_name]
+            pbix_df  = pbix_tables[pbix_name]
+
+            # Determine matched columns (same logic as compare_tables)
+            twbx_col_map: Dict[str, str] = {_norm_col(c): c for c in twbx_df.columns}
+            pbix_col_map:  Dict[str, str] = {_norm_col(c): c for c in pbix_df.columns}
+            matched_norm = sorted(set(twbx_col_map.keys()) & set(pbix_col_map.keys()))
+
+            table_result: Dict[str, Any] = {
+                "table_name": twbx_name,
+                "pbix_name":  pbix_name,
+                "result": "PASS",
+                "column_analyses": [],
+                "columns_analyzed": len(matched_norm),
+                "mismatched_columns": 0,
+                "failure_reasons": [],
+            }
+
+            for norm_name in matched_norm:
+                twbx_orig = twbx_col_map[norm_name]
+                pbix_orig  = pbix_col_map[norm_name]
+
+                col_analysis = self._analyze_column_values(
+                    twbx_df[twbx_orig],
+                    pbix_df[pbix_orig],
+                    twbx_orig,
+                    max_unique=max_unique,
+                    overlap_threshold_pct=overlap_threshold_pct,
+                )
+                table_result["column_analyses"].append(col_analysis)
+
+                if col_analysis["result"] == "FAIL":
+                    table_result["mismatched_columns"] += 1
+                    table_result["result"] = "FAIL"
+                    table_result["failure_reasons"].append(
+                        f"Column '{twbx_orig}': "
+                        f"{col_analysis['overlap_pct']:.1f}% value overlap "
+                        f"({col_analysis['only_in_twbx_count']} value(s) only in Tableau, "
+                        f"{col_analysis['only_in_pbix_count']} value(s) only in Power BI)"
+                    )
+                    if verbose:
+                        logger.warning(
+                            f"[{twbx_name}.{twbx_orig}] Value overlap "
+                            f"{col_analysis['overlap_pct']:.1f}% < "
+                            f"{overlap_threshold_pct}%"
+                        )
+
+            if table_result["result"] == "FAIL":
+                all_pass = False
+
+            results.append(table_result)
+
+        overall = "PASS" if all_pass else "FAIL"
+        logger.info(f"Column data content analysis result: {overall}")
+        return overall, results
+
+    def _analyze_column_values(
+        self,
+        twbx_col: "pd.Series",
+        pbix_col:  "pd.Series",
+        col_name: str,
+        max_unique: int = 500,
+        overlap_threshold_pct: float = 100.0,
+    ) -> Dict[str, Any]:
+        """
+        Compare the unique value sets of two columns.
+
+        Returns a dict with:
+          column_name, result (PASS/FAIL), overlap_pct,
+          twbx_unique_count, pbix_unique_count,
+          only_in_twbx (preview list), only_in_pbix (preview list),
+          only_in_twbx_count, only_in_pbix_count,
+          twbx_preview_truncated, pbix_preview_truncated,
+          numeric_stats (optional).
+        """
+        MAX_PREVIEW = 10   # maximum sample values to surface per side
+
+        # Convert to strings so mixed-type columns compare safely
+        def _safe_unique(series: "pd.Series") -> set:
+            vals = series.dropna()
+            if len(vals) == 0:
+                return set()
+            str_vals = vals.astype(str).unique()
+            if len(str_vals) > max_unique:
+                # Cap to avoid memory blow-up on high-cardinality columns
+                return set(str_vals[:max_unique])
+            return set(str_vals)
+
+        twbx_vals = _safe_unique(twbx_col)
+        pbix_vals  = _safe_unique(pbix_col)
+
+        only_in_twbx_full = sorted(twbx_vals - pbix_vals)
+        only_in_pbix_full  = sorted(pbix_vals  - twbx_vals)
+
+        union_size = len(twbx_vals | pbix_vals)
+        inter_size = len(twbx_vals & pbix_vals)
+        overlap_pct = round(inter_size / union_size * 100, 2) if union_size > 0 else 100.0
+        mismatch_pct = round(100.0 - overlap_pct, 2)
+
+        analysis: Dict[str, Any] = {
+            "column_name":           col_name,
+            "result":                "FAIL" if overlap_pct < overlap_threshold_pct else "PASS",
+            "overlap_pct":           overlap_pct,
+            "mismatch_pct":          mismatch_pct,
+            "twbx_unique_count":     len(twbx_vals),
+            "pbix_unique_count":     len(pbix_vals),
+            "only_in_twbx":          only_in_twbx_full[:MAX_PREVIEW],
+            "only_in_pbix":          only_in_pbix_full[:MAX_PREVIEW],
+            "only_in_twbx_count":    len(only_in_twbx_full),
+            "only_in_pbix_count":    len(only_in_pbix_full),
+            "twbx_preview_truncated": len(only_in_twbx_full) > MAX_PREVIEW,
+            "pbix_preview_truncated":  len(only_in_pbix_full) > MAX_PREVIEW,
+        }
+
+        # Numeric stats comparison (best-effort; silently skipped for non-numeric)
+        try:
+            twbx_num = pd.to_numeric(twbx_col.dropna(), errors="raise")
+            pbix_num  = pd.to_numeric(pbix_col.dropna(),  errors="raise")
+
+            def _stats(s: "pd.Series") -> Dict[str, Optional[float]]:
+                if len(s) == 0:
+                    return {"mean": None, "std": None, "min": None, "max": None}
+                return {
+                    "mean": round(float(s.mean()), 4),
+                    "std":  round(float(s.std()),  4) if len(s) > 1 else None,
+                    "min":  round(float(s.min()),  4),
+                    "max":  round(float(s.max()),  4),
+                }
+
+            twbx_stats = _stats(twbx_num)
+            pbix_stats  = _stats(pbix_num)
+
+            mean_diff = None
+            mean_diff_pct = None
+            if twbx_stats["mean"] is not None and pbix_stats["mean"] is not None:
+                mean_diff = round(abs(twbx_stats["mean"] - pbix_stats["mean"]), 4)
+                if twbx_stats["mean"] != 0:
+                    mean_diff_pct = round(
+                        mean_diff / abs(twbx_stats["mean"]) * 100, 2
+                    )
+
+            analysis["numeric_stats"] = {
+                "twbx": twbx_stats,
+                "pbix":  pbix_stats,
+                "mean_diff":     mean_diff,
+                "mean_diff_pct": mean_diff_pct,
+            }
+        except (ValueError, TypeError):
+            pass  # Non-numeric column — no numeric stats
+
+        return analysis
+
+    # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
 

@@ -14,7 +14,7 @@ import { useExportReport } from "@/hooks/useExportReport";
 import { useNotifications } from "@/context/NotificationsContext";
 import { computeStats } from "@/lib/utils";
 import { validationService } from "@/services/validationService";
-import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, ValidationRun, ExcludedParameters } from "@/types";
+import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, ValidationRun, ExcludedParameters, TableDetail } from "@/types";
 import { DEFAULT_EXCLUDED_PARAMS, excludedToEnabled } from "@/types";
 
 // ─── Map backend result → frontend ReportPair ─────────────────────────────────
@@ -32,12 +32,36 @@ function backendResultToReportPair(result: any): ReportPair {
       return name.split(" vs ").map(s => s.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "")).join(" vs ");
     };
 
+    const l3Details: TableDetail[] = (result.layer3Details ?? []).map((d: any) => ({
+      tableName:            d.tableName,
+      result:               d.result,
+      matchMethod:          d.matchMethod ?? "unknown",
+      rowCountTableau:      d.rowCountTableau ?? undefined,
+      rowCountPowerBi:      d.rowCountPowerBi ?? undefined,
+      rowCountDiffPct:      d.rowCountDiffPct ?? undefined,
+      columnCountTableau:   d.columnCountTableau ?? undefined,
+      columnCountPowerBi:   d.columnCountPowerBi ?? undefined,
+      columnsMatched:       d.columnsMatched ?? [],
+      columnsMissingInPbi:  d.columnsMissingInPbi ?? [],
+      columnsMissingInTwbx: d.columnsMissingInTwbx ?? [],
+      columnTypeMismatches: (d.columnTypeMismatches ?? []).map((m: any) => ({
+        column:        m.column,
+        twbxType:      m.twbx_type ?? m.twbxType,
+        pbiType:       m.pbix_type ?? m.pbiType,
+        twbxCanonical: m.twbx_canonical ?? m.twbxCanonical,
+        pbiCanonical:  m.pbix_canonical ?? m.pbiCanonical,
+      })),
+      failureReasons: d.failureReasons ?? [],
+    }));
+
     return {
       ...result,
       overallStatus: (result.overallStatus ?? "PENDING").toUpperCase(),
       reportName: cleanRepoName(result.reportName),
       tableauWorkbook: result.tableauWorkbook?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, ""),
-      powerBiReportName: result.powerBiReportName?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "")
+      powerBiReportName: result.powerBiReportName?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, ""),
+      layer2Details: result.layer2Details ?? null,
+      layer3Details: l3Details,
     } as ReportPair;
   }
 
@@ -81,7 +105,7 @@ function backendResultToReportPair(result: any): ReportPair {
       });
   }
 
-  // Semantic model layer (L2)
+  // Semantic model layer (L2) — calc field mismatches
   if (result.categories?.semantic_model?.details?.failure_reasons?.length > 0) {
     result.categories.semantic_model.details.failure_reasons.forEach((reason: string) => {
       differences.push({
@@ -91,6 +115,20 @@ function backendResultToReportPair(result: any): ReportPair {
         layer: "L2",
       });
     });
+  }
+
+  // Semantic model layer (L2) — column data content mismatches
+  if (result.categories?.semantic_model?.column_value_analysis?.result === "FAIL") {
+    (result.categories.semantic_model.column_value_analysis.details ?? [])
+      .filter((t: any) => t.result === "FAIL")
+      .forEach((t: any) => {
+        differences.push({
+          type: "Data Content Mismatch",
+          detail: `Table '${t.table_name}': ${t.mismatched_columns}/${t.columns_analyzed} column(s) have value-set differences`,
+          severity: "high",
+          layer: "L2",
+        });
+      });
   }
 
   // Relationships layer (L1 - Fallback if visual is missing but relationships exist)
@@ -149,6 +187,29 @@ function backendResultToReportPair(result: any): ReportPair {
     };
   }
 
+  // Extract column-level details from the raw data layer details
+  const layer3Details: TableDetail[] = (result.categories?.data?.details ?? []).map((d: any) => ({
+    tableName:            d.table_name,
+    result:               d.result,
+    matchMethod:          d.match_method ?? "unknown",
+    rowCountTableau:      d.row_count_twbx ?? undefined,
+    rowCountPowerBi:      d.row_count_pbix ?? undefined,
+    rowCountDiffPct:      d.row_count_diff_pct ?? undefined,
+    columnCountTableau:   d.column_count_twbx ?? undefined,
+    columnCountPowerBi:   d.column_count_pbix ?? undefined,
+    columnsMatched:       d.columns_matched ?? [],
+    columnsMissingInPbi:  d.columns_missing_in_pbix ?? [],
+    columnsMissingInTwbx: d.columns_missing_in_twbx ?? [],
+    columnTypeMismatches: (d.column_type_mismatches ?? []).map((m: any) => ({
+      column:        m.column,
+      twbxType:      m.twbx_type,
+      pbiType:       m.pbix_type,
+      twbxCanonical: m.twbx_canonical,
+      pbiCanonical:  m.pbix_canonical,
+    })),
+    failureReasons: d.failure_reasons ?? [],
+  }));
+
   return {
     id: result.id || result.comparison_id,
     projectId: "proj-001",
@@ -162,6 +223,37 @@ function backendResultToReportPair(result: any): ReportPair {
     layer2Status: toLayer(result.categories?.semantic_model?.result || result.layer2Status || "pending"),
     layer3Status: toLayer(result.categories?.data?.result || result.layer3Status || "pending"),
     differences,
+    layer2Details: (() => {
+      const cv = result.categories?.semantic_model?.column_value_analysis;
+      if (!cv) return null;
+      return {
+        columnValueStatus: cv.result ?? null,
+        columnValueDetails: (cv.details ?? []).map((tbl: any) => ({
+          tableName:         tbl.table_name,
+          pbixTableName:     tbl.pbix_name,
+          result:            tbl.result,
+          columnsAnalyzed:   tbl.columns_analyzed ?? 0,
+          mismatchedColumns: tbl.mismatched_columns ?? 0,
+          failureReasons:    tbl.failure_reasons ?? [],
+          columnAnalyses: (tbl.column_analyses ?? []).map((col: any) => ({
+            columnName:            col.column_name,
+            result:                col.result,
+            overlapPct:            col.overlap_pct ?? 100,
+            mismatchPct:           col.mismatch_pct ?? 0,
+            twbxUniqueCount:       col.twbx_unique_count ?? 0,
+            pbixUniqueCount:       col.pbix_unique_count ?? 0,
+            onlyInTwbx:            col.only_in_twbx ?? [],
+            onlyInPbix:            col.only_in_pbix ?? [],
+            onlyInTwbxCount:       col.only_in_twbx_count ?? 0,
+            onlyInPbixCount:       col.only_in_pbix_count ?? 0,
+            twbxPreviewTruncated:  col.twbx_preview_truncated ?? false,
+            pbixPreviewTruncated:  col.pbix_preview_truncated ?? false,
+            numericStats:          col.numeric_stats,
+          })),
+        })),
+      };
+    })(),
+    layer3Details,
     visualResult: visualResult as any,
     tableauScreenshot: result.tableauScreenshot,
     powerBiScreenshot: result.powerBiScreenshot,
