@@ -21,6 +21,8 @@ from typing import Optional
 from parsers.twbx_parser import TwbxParser
 from parsers.pbix_parser import PbixParser
 from comparators.data_comparator import DataComparator
+from comparators.data_comparator_pbit import PbitDataComparator
+from comparators.data_router import run_data_comparison
 from comparators.model_comparator import ModelComparator
 from comparators.relationship_comparator import RelationshipComparator
 from output.result_builder import ComparisonResultBuilder
@@ -153,8 +155,11 @@ def compare_reports(
         # ── Compare data ────────────────────────────────────────────────
         logger.info("Comparing data...")
         data_comparator = DataComparator()
-        data_result, data_details = data_comparator.compare_tables(
-            twbx_tables, pbix_tables, verbose=verbose
+        data_result, data_details = run_data_comparison(
+            twbx_tables,
+            pbix_tables,
+            pbix_path,
+            verbose=verbose
         )
 
         # ── Analyse column data content (L2) ────────────────────────────

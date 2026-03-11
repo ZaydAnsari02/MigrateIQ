@@ -649,3 +649,37 @@ class DataComparator:
             }
             for table_name, df in tables.items()
         }
+    
+    def compare_measures(self, twbx_measures, pbit_measures, tables):
+
+        results = []
+
+        df = list(tables.values())[0]
+
+        for t in twbx_measures:
+
+            name = t["name"]
+            t_formula = t.get("expression")
+
+            p = next((m for m in pbit_measures if m["name"] == name), None)
+
+            if not p:
+                continue
+
+            p_formula = p.get("expression")
+
+            t_value = self.execute_formula(t_formula, df)
+            p_value = self.execute_formula(p_formula, df)
+
+            status = "PASS" if t_value == p_value else "FAIL"
+
+            results.append({
+                "measure": name,
+                "tableau_formula": t_formula,
+                "powerbi_formula": p_formula,
+                "tableau_value": t_value,
+                "powerbi_value": p_value,
+                "status": status
+            })
+
+        return results
