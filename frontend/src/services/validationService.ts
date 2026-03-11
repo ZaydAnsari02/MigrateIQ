@@ -31,6 +31,19 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// On 401, clear the stored session and redirect to login.
+api.interceptors.response.use(
+  (response) => response,
+  (error: AxiosError) => {
+    if (error.response?.status === 401 && typeof window !== "undefined") {
+      localStorage.removeItem("migrateiq_token");
+      localStorage.removeItem("migrateiq_user");
+      window.location.href = "/login";
+    }
+    return Promise.reject(error);
+  }
+);
+
 // ─── Types returned by the FastAPI backend ────────────────────────────────────
 // These mirror the JSON structure produced by output/result_builder.py
 

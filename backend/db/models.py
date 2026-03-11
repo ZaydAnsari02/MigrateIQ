@@ -52,6 +52,7 @@ class MigrationProject(Base):
     tableau_server_url: Mapped[Optional[str]] = mapped_column(String,  nullable=True)
     tableau_site: Mapped[Optional[str]]       = mapped_column(String,  nullable=True)
     powerbi_workspace_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    owner: Mapped[Optional[str]]              = mapped_column(String,  nullable=True)
     created_at: Mapped[datetime]              = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime]              = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -311,6 +312,9 @@ def _migrate_columns(engine) -> None:
     from sqlalchemy import text
 
     migrations: dict[str, list[tuple[str, str]]] = {
+        "migration_project": [
+            ("owner", "TEXT"),
+        ],
         "visual_result": [
             ("pixel_diff_count",       "INTEGER"),
             ("total_pixels",           "INTEGER"),
