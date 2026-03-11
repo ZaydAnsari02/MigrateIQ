@@ -145,6 +145,7 @@ export function useExportReport() {
     const now = new Date().toLocaleString("en-GB", {
       day: "2-digit", month: "short", year: "numeric",
       hour: "2-digit", minute: "2-digit",
+      timeZone: "Asia/Kolkata",
     });
     y = 28;
     setFont(8, [147, 197, 253]);
@@ -206,13 +207,15 @@ export function useExportReport() {
       doc.text("Layer Status per Run", PAD, y);
       y += 14;
 
+      // Total available width = W - 2*PAD = 515pt
+      // name(160) + ts(113) + ovr(62) + l1(60) + l2(60) + l3(60) = 515
       const COL = {
-        name: { x: PAD,       w: 170, label: "Report Name" },
-        ts:   { x: PAD + 178, w: 106, label: "Timestamp"   },
-        ovr:  { x: PAD + 292, w: 66,  label: "Overall"     },
-        l1:   { x: PAD + 366, w: 52,  label: "L1"          },
-        l2:   { x: PAD + 426, w: 52,  label: "L2"          },
-        l3:   { x: PAD + 486, w: 52,  label: "L3"          },
+        name: { x: PAD,       w: 160, label: "Report Name", center: false },
+        ts:   { x: PAD + 160, w: 113, label: "Timestamp",   center: false },
+        ovr:  { x: PAD + 273, w: 62,  label: "Overall",     center: true  },
+        l1:   { x: PAD + 335, w: 60,  label: "L1",          center: true  },
+        l2:   { x: PAD + 395, w: 60,  label: "L2",          center: true  },
+        l3:   { x: PAD + 455, w: 60,  label: "L3",          center: true  },
       };
 
       // Header row
@@ -221,7 +224,11 @@ export function useExportReport() {
       const hY = y + 13;
       Object.values(COL).forEach(col => {
         setFont(7.5, MID, "bold");
-        doc.text(col.label.toUpperCase(), col.x + 4, hY);
+        if (col.center) {
+          doc.text(col.label.toUpperCase(), col.x + col.w / 2, hY, { align: "center" });
+        } else {
+          doc.text(col.label.toUpperCase(), col.x + 4, hY);
+        }
       });
       y += 20;
 
@@ -232,29 +239,35 @@ export function useExportReport() {
         doc.rect(PAD, y, W - PAD * 2, ROW_H, "F");
         const rY = y + 16;
 
-        const shortName = pair.reportName.length > 26 ? pair.reportName.slice(0, 24) + "..." : pair.reportName;
         setFont(8, DARK);
+        const nameLines = doc.splitTextToSize(pair.reportName, COL.name.w - 8) as string[];
+        const shortName = nameLines.length > 1 ? nameLines[0].trimEnd() + "…" : pair.reportName;
         doc.text(shortName, COL.name.x + 4, rY);
 
         const ts = new Date(pair.createdAt).toLocaleString("en-GB", {
           day: "2-digit", month: "short", year: "numeric",
           hour: "2-digit", minute: "2-digit",
+          timeZone: "Asia/Kolkata",
         });
         setFont(7.5, MID);
         doc.text(ts, COL.ts.x + 4, rY);
 
-        badge(pair.overallStatus, COL.ovr.x + 4, rY);
-        const layerBadge = (status: string, x: number, y2: number) => {
+        // Center badges within their column widths
+        const OVR_BW = 46;
+        badge(pair.overallStatus, COL.ovr.x + (COL.ovr.w - OVR_BW) / 2, rY, OVR_BW);
+        const LAYER_BW = 42;
+        const layerBadge = (status: string, col: { x: number; w: number }, y2: number) => {
+          const bx = col.x + (col.w - LAYER_BW) / 2;
           if (status === "skipped") {
             setFont(9, MID, "bold");
-            doc.text("—", x + 21, y2, { align: "center" });
+            doc.text("—", col.x + col.w / 2, y2, { align: "center" });
           } else {
-            badge(status, x, y2, 42);
+            badge(status, bx, y2, LAYER_BW);
           }
         };
-        layerBadge(pair.layer1Status, COL.l1.x + 2,  rY);
-        layerBadge(pair.layer2Status, COL.l2.x + 2,  rY);
-        layerBadge(pair.layer3Status, COL.l3.x + 2,  rY);
+        layerBadge(pair.layer1Status, COL.l1, rY);
+        layerBadge(pair.layer2Status, COL.l2, rY);
+        layerBadge(pair.layer3Status, COL.l3, rY);
 
         y += ROW_H;
       });

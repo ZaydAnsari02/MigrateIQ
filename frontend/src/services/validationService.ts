@@ -23,11 +23,26 @@ const api = axios.create({
 // which user triggered each validation run.
 api.interceptors.request.use((config) => {
   if (typeof window !== "undefined") {
-    const token = localStorage.getItem("migrateiq_token");
-    if (token) config.headers["x-token"] = token;
+    const token    = localStorage.getItem("migrateiq_token");
+    const username = localStorage.getItem("migrateiq_user");
+    if (token)    config.headers["x-token"]    = token;
+    if (username) config.headers["x-username"] = username;
   }
   return config;
 });
+
+// On 401, clear the stored session and redirect to login.
+api.interceptors.response.use(
+  (response) => response,
+  (error: AxiosError) => {
+    if (error.response?.status === 401 && typeof window !== "undefined") {
+      localStorage.removeItem("migrateiq_token");
+      localStorage.removeItem("migrateiq_user");
+      window.location.href = "/login";
+    }
+    return Promise.reject(error);
+  }
+);
 
 // ─── Types returned by the FastAPI backend ────────────────────────────────────
 // These mirror the JSON structure produced by output/result_builder.py

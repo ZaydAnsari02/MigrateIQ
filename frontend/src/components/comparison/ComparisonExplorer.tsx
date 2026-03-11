@@ -71,9 +71,9 @@ const PARAM_RESULT_LABELS: Record<string, string> = {
 };
 
 const LAYER_META = {
-  L1: { bg: "bg-blue-50", border: "border-blue-200", dot: "bg-blue-500", pill: "bg-blue-100 text-blue-700", name: "Visual" },
+  L1: { bg: "bg-blue-50",   border: "border-blue-200",   dot: "bg-blue-500",   pill: "bg-blue-100 text-blue-700",     name: "Visual"   },
   L2: { bg: "bg-violet-50", border: "border-violet-200", dot: "bg-violet-500", pill: "bg-violet-100 text-violet-700", name: "Semantic" },
-  L3: { bg: "bg-rose-50", border: "border-rose-200", dot: "bg-rose-500", pill: "bg-rose-100 text-rose-700", name: "Data" },
+  L3: { bg: "bg-rose-50",   border: "border-rose-200",   dot: "bg-rose-500",   pill: "bg-rose-100 text-rose-700",     name: "Data"     },
 } as const;
 
 /**
@@ -194,6 +194,7 @@ export function ComparisonExplorer({ pairs, initialLeftId }: ComparisonExplorerP
   const [liveResult, setLiveResult]       = useState<Record<string, any> | null>(null);
   const [filtersOpen, setFiltersOpen]     = useState(false);
   const [cardsOpen, setCardsOpen]         = useState(false);
+  const [search, setSearch]               = useState("");
 
   // Result visibility filters
   const [showPass,    setShowPass]    = useState(true);
@@ -234,6 +235,10 @@ export function ComparisonExplorer({ pairs, initialLeftId }: ComparisonExplorerP
       setIsRunning(false);
     }
   }
+
+  const filteredPairs = pairs.filter(p =>
+    p.reportName.toLowerCase().includes(search.toLowerCase())
+  );
 
   const pair = pairs.find(p => p.id === selectedId);
 
@@ -317,8 +322,29 @@ export function ComparisonExplorer({ pairs, initialLeftId }: ComparisonExplorerP
             <h3 className="text-xs font-bold text-zinc-800">Report Pairs</h3>
             <p className="text-[10px] text-zinc-400 mt-0.5">{pairs.length} validation result{pairs.length !== 1 ? "s" : ""}</p>
           </div>
-          <div className="py-1.5 max-h-[calc(100vh-220px)] overflow-y-auto">
-            {pairs.map(p => {
+
+          {/* Search */}
+          <div className="px-3 py-2.5 border-b border-zinc-100">
+            <div className="relative">
+              <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-zinc-400 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" />
+              </svg>
+              <input
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search reports…"
+                className="w-full pl-7 pr-2 py-1.5 text-[11px] bg-zinc-50 border border-zinc-200 rounded-lg outline-none focus:border-blue-400 focus:bg-white transition-colors placeholder:text-zinc-400"
+              />
+            </div>
+          </div>
+
+          {/* Report list */}
+          <div className="py-1.5 max-h-[calc(100vh-265px)] overflow-y-auto">
+            {filteredPairs.length === 0 ? (
+              <p className="text-[11px] text-zinc-400 text-center py-6">No reports match &ldquo;{search}&rdquo;</p>
+            ) : null}
+            {filteredPairs.map(p => {
               const isSelected = p.id === selectedId;
               return (
                 <button
@@ -371,11 +397,16 @@ export function ComparisonExplorer({ pairs, initialLeftId }: ComparisonExplorerP
                     { key: "L2", status: pair.layer2Status },
                     { key: "L3", status: pair.layer3Status },
                   ].map(l => {
-                    const lc = LAYER_META[l.key as keyof typeof LAYER_META];
+                    const pillStyle =
+                      l.status === "skipped"
+                        ? "bg-zinc-50 border-zinc-200 text-zinc-400"
+                        : l.status?.toUpperCase() === "PASS"
+                        ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+                        : "bg-red-50 border-red-200 text-red-600";
                     return (
                       <div key={l.key} className={cn(
                         "flex items-center gap-1 px-2 py-1 rounded-lg border text-[9px] font-bold uppercase",
-                        l.status === "skipped" ? "bg-zinc-50 border-zinc-200 text-zinc-400" : cn(lc.bg, lc.border, lc.pill)
+                        pillStyle
                       )}>
                         <span>{l.key}</span><span>·</span><LayerDot status={l.status} />
                       </div>

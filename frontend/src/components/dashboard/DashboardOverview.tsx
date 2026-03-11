@@ -35,12 +35,13 @@ function ActivityRow({ pair }: { pair: ReportPair }) {
     <div className="flex items-center gap-3 py-2 border-b border-zinc-50 last:border-0">
       <span className={cn("text-sm font-bold w-4 text-center shrink-0", color)}>{icon}</span>
       <span className="text-xs text-zinc-700 flex-1 truncate">{pair.reportName}</span>
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1.5">
         {([pair.layer1Status, pair.layer2Status, pair.layer3Status] as const).map((s, i) => {
           const sl = (s ?? "").toLowerCase();
           return (
             <span
               key={i}
+              title={`L${i + 1}: ${s}`}
               className={cn(
                 "w-1.5 h-1.5 rounded-full",
                 sl === "pass" ? "bg-emerald-400" :
@@ -49,7 +50,6 @@ function ActivityRow({ pair }: { pair: ReportPair }) {
                 sl === "review" ? "bg-amber-400" :
                 "bg-zinc-200"
               )}
-              title={s}
             />
           );
         })}
@@ -123,7 +123,14 @@ export function DashboardOverview({ stats, runs, pairs }: DashboardOverviewProps
 
         {/* Recent activity */}
         <div className="lg:col-span-2 bg-white rounded-xl border border-zinc-200 shadow-card p-5">
-          <h3 className="text-xs font-semibold text-zinc-700 mb-3">Recent Report Results</h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-semibold text-zinc-700">Recent Report Results</h3>
+            <div className="flex items-center gap-1.5">
+              {["L1", "L2", "L3"].map(l => (
+                <span key={l} className="text-[8px] font-bold text-zinc-400 w-1.5 text-center">{l}</span>
+              ))}
+            </div>
+          </div>
           <div>
             {pairs.slice(0, 6).map(pair => (
               <ActivityRow key={pair.id} pair={pair} />
