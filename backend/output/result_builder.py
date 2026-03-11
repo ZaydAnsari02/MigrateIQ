@@ -33,6 +33,8 @@ class ComparisonResultBuilder:
         model_details: Dict[str, Any],
         relationships_result: str,
         relationships_details: Dict[str, Any],
+        column_value_result: str = "PASS",
+        column_value_details: List[Dict[str, Any]] = None,
         tolerance_pct: float = 0.5,
     ) -> Dict[str, Any]:
         """
@@ -49,10 +51,18 @@ class ComparisonResultBuilder:
         Returns:
             Complete result dictionary
         """
+        if column_value_details is None:
+            column_value_details = []
+
         # Determine overall result
         overall_result = (
             "PASS"
-            if (data_result == "PASS" and model_result == "PASS" and relationships_result == "PASS")
+            if (
+                data_result == "PASS"
+                and model_result == "PASS"
+                and relationships_result == "PASS"
+                and column_value_result == "PASS"
+            )
             else "FAIL"
         )
 
@@ -60,8 +70,9 @@ class ComparisonResultBuilder:
         failure_categories = []
         if data_result == "FAIL":
             failure_categories.append("data")
-        if model_result == "FAIL":
-            failure_categories.append("semantic_model")
+        if model_result == "FAIL" or column_value_result == "FAIL":
+            if "semantic_model" not in failure_categories:
+                failure_categories.append("semantic_model")
         if relationships_result == "FAIL":
             failure_categories.append("relationships")
 
@@ -73,13 +84,29 @@ class ComparisonResultBuilder:
             "details": data_details,
         }
 
-        # Build model section
+        # Count column value mismatches for summary
+        cv_mismatched_tables = sum(
+            1 for t in column_value_details if t.get("result") == "FAIL"
+        )
+        cv_total_tables = sum(
+            1 for t in column_value_details if t.get("result") != "SKIPPED"
+        )
+
+        # Build model section (L2 — includes column data content analysis)
         model_section = {
-            "result": model_result,
+            "result": model_result if column_value_result == "PASS" else (
+                "FAIL" if column_value_result == "FAIL" else model_result
+            ),
             "measures_compared": len(model_details.get("measures_matched", []))
             + len(model_details.get("measures_missing_in_pbix", []))
             + len(model_details.get("measures_missing_in_twbx", [])),
             "details": model_details,
+            "column_value_analysis": {
+                "result": column_value_result,
+                "tables_analyzed": cv_total_tables,
+                "tables_with_mismatches": cv_mismatched_tables,
+                "details": column_value_details,
+            },
         }
 
         # Build relationships section

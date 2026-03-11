@@ -3,7 +3,7 @@
 export type ValidationStatus = "PASS" | "FAIL" | "PENDING" | "RUNNING" | "ERROR" | "REVIEW";
 export type LayerStatus = "pass" | "fail" | "pending" | "running" | "review" | "skipped";
 export type DiffSeverity = "high" | "medium" | "low";
-export type DiffType = "Metric Mismatch" | "Missing Filter" | "Visual Mismatch" | "DAX Mismatch" | "Data Regression";
+export type DiffType = "Metric Mismatch" | "Missing Filter" | "Visual Mismatch" | "DAX Mismatch" | "Data Regression" | "Data Content Mismatch";
 
 // ─── Core Entities ────────────────────────────────────────────────────────────
 
@@ -31,6 +31,75 @@ export interface ValidationRun {
   completedAt?: string;
 }
 
+export interface TableTypeMismatch {
+  column: string;
+  twbxType: string;
+  pbiType: string;
+  twbxCanonical: string;
+  pbiCanonical: string;
+}
+
+// ─── Column Data Content Analysis (L2) ────────────────────────────────────────
+
+export interface NumericStats {
+  mean: number | null;
+  std: number | null;
+  min: number | null;
+  max: number | null;
+}
+
+export interface ColumnValueAnalysis {
+  columnName: string;
+  result: "PASS" | "FAIL";
+  overlapPct: number;
+  mismatchPct: number;
+  twbxUniqueCount: number;
+  pbixUniqueCount: number;
+  onlyInTwbx: string[];
+  onlyInPbix: string[];
+  onlyInTwbxCount: number;
+  onlyInPbixCount: number;
+  twbxPreviewTruncated: boolean;
+  pbixPreviewTruncated: boolean;
+  numericStats?: {
+    twbx: NumericStats;
+    pbix: NumericStats;
+    mean_diff: number | null;
+    mean_diff_pct: number | null;
+  };
+}
+
+export interface TableColumnValueDetail {
+  tableName: string;
+  pbixTableName?: string;
+  result: "PASS" | "FAIL" | "SKIPPED";
+  columnsAnalyzed: number;
+  mismatchedColumns: number;
+  failureReasons: string[];
+  columnAnalyses: ColumnValueAnalysis[];
+}
+
+export interface Layer2Details {
+  columnValueStatus: string | null;
+  columnValueDetails: TableColumnValueDetail[];
+}
+
+export interface TableDetail {
+  tableName: string;
+  result: "PASS" | "FAIL";
+  matchMethod: string;
+  rowCountTableau?: number;
+  rowCountPowerBi?: number;
+  rowCountDiffPct?: number;
+  columnCountTableau?: number;
+  columnCountPowerBi?: number;
+  columnsMatched: string[];
+  columnsMissingInPbi: string[];
+  columnsMissingInTwbx: string[];
+  columnTypeMismatches: TableTypeMismatch[];
+  failureReasons: string[];
+}
+
 export interface ReportPair {
   id: string;
   projectId: string;
@@ -54,6 +123,8 @@ export interface ReportPair {
   layer3Status: LayerStatus;
   differences: Difference[];
   visualResult?: VisualResult;
+  layer2Details?: Layer2Details | null;
+  layer3Details?: TableDetail[];
   createdAt: string;
   updatedAt: string;
 }
@@ -225,13 +296,15 @@ export interface VisualParameterResults {
 // ─── Card Visibility ──────────────────────────────────────────────────────────
 
 export interface CardVisibility {
-  visualBreakdown: boolean;   // Parameter results table after re-run
-  regressionLog:   boolean;   // All-layers regression log
+  visualBreakdown:    boolean;   // Parameter results table after re-run
+  regressionLog:      boolean;   // All-layers regression log
+  columnDataContent:  boolean;   // L2 column data content analysis
 }
 
 export const DEFAULT_CARD_VISIBILITY: CardVisibility = {
-  visualBreakdown: true,
-  regressionLog:   true,
+  visualBreakdown:   true,
+  regressionLog:     true,
+  columnDataContent: true,
 };
 
 // ─── Upload ───────────────────────────────────────────────────────────────────

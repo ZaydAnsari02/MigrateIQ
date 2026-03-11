@@ -227,6 +227,9 @@ class SemanticResult(Base):
     matched_fields: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     flagged_fields: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status:         Mapped[str] = mapped_column(String,  nullable=False)
+    # L2 — Column data content analysis (stored as JSON)
+    column_value_status:  Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    column_value_details: Mapped[Optional[str]] = mapped_column(Text,   nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     # Relationships
@@ -287,6 +290,14 @@ class TableComparison(Base):
     row_count_pbix:    Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     row_count_diff_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     failure_reasons:   Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Column-level analysis fields (stored as JSON strings)
+    columns_matched:          Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    columns_missing_in_pbix:  Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    columns_missing_in_twbx:  Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    column_type_mismatches:   Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    column_count_twbx:        Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    column_count_pbix:        Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    match_method:             Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime]             = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     # Relationships
@@ -351,6 +362,19 @@ def _migrate_columns(engine) -> None:
         ],
         "validation_run": [
             ("errored", "INTEGER"),
+        ],
+        "table_comparison": [
+            ("columns_matched",         "TEXT"),
+            ("columns_missing_in_pbix", "TEXT"),
+            ("columns_missing_in_twbx", "TEXT"),
+            ("column_type_mismatches",  "TEXT"),
+            ("column_count_twbx",       "INTEGER"),
+            ("column_count_pbix",       "INTEGER"),
+            ("match_method",            "TEXT"),
+        ],
+        "semantic_result": [
+            ("column_value_status",  "TEXT"),
+            ("column_value_details", "TEXT"),
         ],
     }
 
@@ -436,15 +460,20 @@ def save_comparison_result(
             detail = "Missing in Power BI"
         ))
 
+    import json as _json
+
     # 3. Layer 2: Semantic Model
     sem_cat = cats.get("semantic_model", {})
     sem_details = sem_cat.get("details", {})
+    cv_analysis = sem_cat.get("column_value_analysis", {})
     semantic = SemanticResult(
-        report_pair_id = pair.id,
-        total_fields   = sem_cat.get("measures_compared", 0),
-        matched_fields = len(sem_details.get("measures_matched", [])),
-        flagged_fields = len(sem_details.get("expression_mismatches", [])),
-        status         = sem_cat.get("result", "PENDING"),
+        report_pair_id        = pair.id,
+        total_fields          = sem_cat.get("measures_compared", 0),
+        matched_fields        = len(sem_details.get("measures_matched", [])),
+        flagged_fields        = len(sem_details.get("expression_mismatches", [])),
+        status                = sem_cat.get("result", "PENDING"),
+        column_value_status   = cv_analysis.get("result"),
+        column_value_details  = _json.dumps(cv_analysis.get("details", [])),
     )
     session.add(semantic)
     session.flush()
@@ -473,13 +502,20 @@ def save_comparison_result(
 
     for detail in data_cat.get("details", []):
         session.add(TableComparison(
-            data_result_id = data_res.id,
-            table_name = detail.get("table_name", "unknown"),
-            result = detail.get("result", "PENDING"),
-            row_count_twbx = detail.get("row_count_twbx"),
-            row_count_pbix = detail.get("row_count_pbix"),
-            row_count_diff_pct = detail.get("row_count_diff_pct"),
-            failure_reasons = ", ".join(detail.get("failure_reasons", []))
+            data_result_id      = data_res.id,
+            table_name          = detail.get("table_name", "unknown"),
+            result              = detail.get("result", "PENDING"),
+            row_count_twbx      = detail.get("row_count_twbx"),
+            row_count_pbix      = detail.get("row_count_pbix"),
+            row_count_diff_pct  = detail.get("row_count_diff_pct"),
+            failure_reasons     = ", ".join(detail.get("failure_reasons", [])),
+            columns_matched         = _json.dumps(detail.get("columns_matched", [])),
+            columns_missing_in_pbix = _json.dumps(detail.get("columns_missing_in_pbix", [])),
+            columns_missing_in_twbx = _json.dumps(detail.get("columns_missing_in_twbx", [])),
+            column_type_mismatches  = _json.dumps(detail.get("column_type_mismatches", [])),
+            column_count_twbx       = detail.get("column_count_twbx"),
+            column_count_pbix       = detail.get("column_count_pbix"),
+            match_method            = detail.get("match_method"),
         ))
 
     return pair
