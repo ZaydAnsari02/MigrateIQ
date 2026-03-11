@@ -59,17 +59,18 @@ app.mount("/screenshots", StaticFiles(directory=str(BACKEND_DIR / "screenshots")
 # ─── Startup Logic ────────────────────────────────────────────────────────────
 @app.on_event("startup")
 def startup_event():
-    # Ensure at least one project exists
+    # Ensure one project exists per user
     db = SessionLocal()
-    project = db.query(MigrationProject).first()
-    if not project:
-        project = MigrationProject(
-            name="Default Migration Project",
-            client_name="AI Telekom",
-            description="Initial project for report validation"
-        )
-        db.add(project)
-        db.commit()
+    for username in USERS:
+        project = db.query(MigrationProject).filter(MigrationProject.owner == username).first()
+        if not project:
+            db.add(MigrationProject(
+                name="Default Migration Project",
+                client_name="AI Telekom",
+                description="Initial project for report validation",
+                owner=username
+            ))
+    db.commit()
     db.close()
 
 
@@ -92,6 +93,19 @@ def get_screenshot_url(absolute_path: str | None) -> str | None:
 SESSIONS: dict[str, str] = {}
 
 
+def get_current_username(
+    x_token: Optional[str] = Header(None),
+    x_username: Optional[str] = Header(None),
+) -> str:
+    """Resolve username from session token or x-username header. Raises 401 if unrecognised."""
+    username = SESSIONS.get(x_token) if x_token else None
+    if not username and x_username and x_username in USERS:
+        username = x_username
+    if not username:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return username
+
+
 # ─── POST /validate ───────────────────────────────────────────────────────────
 @app.post("/validate")
 async def validate_reports(
@@ -100,22 +114,16 @@ async def validate_reports(
     tableau_screenshot: Optional[UploadFile] = File(None),
     pbi_screenshot: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
-    x_token: Optional[str] = Header(None),
-    x_username: Optional[str] = Header(None),
+    current_user: str = Depends(get_current_username),
 ):
     import traceback
-    # Resolve the username: prefer session store, fall back to x-username header, then "Web UI"
-    triggered_by = (
-        SESSIONS.get(x_token)
-        or x_username
-        or "Web UI"
-    ) if x_token else (x_username or "Web UI")
+    triggered_by = current_user
 
     try:
         run_id = str(uuid.uuid4())
         start_time = datetime.utcnow()
 
-        project = db.query(MigrationProject).first()
+        project = db.query(MigrationProject).filter(MigrationProject.owner == current_user).first()
 
         # Create an initial ValidationRun — record who triggered it
         v_run = ValidationRun(
@@ -349,10 +357,16 @@ def _infer_data_status(dat) -> str:
 
 # ─── GET /report-pairs ────────────────────────────────────────────────────────
 @app.get("/report-pairs")
-async def list_report_pairs(db: Session = Depends(get_db)):
+async def list_report_pairs(
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_username),
+):
     from db.models import RelationshipResult, RelationshipDetail, SemanticResult, CalcField, DataResult, TableComparison
-    
-    pairs = db.query(ReportPair).options(
+
+    user_project = db.query(MigrationProject).filter(MigrationProject.owner == current_user).first()
+    project_id = user_project.id if user_project else -1
+
+    pairs = db.query(ReportPair).filter(ReportPair.project_id == project_id).options(
         joinedload(ReportPair.relationship_result).joinedload(RelationshipResult.details),
         joinedload(ReportPair.semantic_result).joinedload(SemanticResult.calc_fields),
         joinedload(ReportPair.data_result).joinedload(DataResult.table_comparisons),
@@ -536,17 +550,17 @@ async def get_result(run_id: str, db: Session = Depends(get_db)):
 
 # ─── GET /results ─────────────────────────────────────────────────────────────
 @app.get("/results")
-async def list_results(db: Session = Depends(get_db)):
-    # 1. Start with JSON files on disk
-    results_dir = BACKEND_DIR / "results"
-    run_ids = [f.stem for f in results_dir.glob("*.json")]
-    
-    # 2. Add database runs
-    runs = db.query(ValidationRun).all()
-    for r in runs:
-        if str(r.id) not in run_ids:
-            run_ids.append(str(r.id))
-            
+async def list_results(
+    db: Session = Depends(get_db),
+    current_user: str = Depends(get_current_username),
+):
+    user_project = db.query(MigrationProject).filter(MigrationProject.owner == current_user).first()
+    project_id = user_project.id if user_project else -1
+
+    # Only return run IDs that belong to this user's project
+    runs = db.query(ValidationRun).filter(ValidationRun.project_id == project_id).all()
+    run_ids = [str(r.id) for r in runs]
+
     return {"run_ids": run_ids, "count": len(run_ids)}
 
 
