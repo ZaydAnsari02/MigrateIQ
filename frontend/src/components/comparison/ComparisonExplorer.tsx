@@ -690,25 +690,37 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
   // Parameter results: prefer live run, fall back to client-side derivation from
   // stored vis match booleans + current exclusion map. This means toggling
   // exclusions immediately updates the breakdown table without a re-run.
+  // Priority:
+  //  1. liveResult?.parameterResults  — fresh re-run result from the UI button
+  //  2. vis?.parameterResults          — pre-computed result stored in DB (loaded via /report-pairs)
+  //  3. deriveParamResults(vis, ...)   — legacy boolean fallback (vis booleans may be undefined)
   const paramResults: Record<string, string> | null =
-    liveResult?.parameterResults ?? deriveParamResults(vis, excluded);
+    liveResult?.parameterResults
+    ?? (vis?.parameterResults ?? null)
+    ?? deriveParamResults(vis, excluded);
 
-  // Derive overall breakdown status: fail if any enabled field failed, else pass.
+  // Derive overall breakdown status: fail if any enabled field failed, else pass/skipped.
   const breakdownStatus: string =
     liveResult?.status ??
+    vis?.status ??
     (paramResults
-      ? Object.values(paramResults).some(s => s === "fail") ? "fail" : "pass"
+      ? Object.values(paramResults).some(s => s === "fail") ? "fail" :
+        Object.values(paramResults).some(s => s === "pass") ? "pass" : "skipped"
       : "");
 
   // Effective L1 status for the header dot — derived from paramResults so that
   // "ignored"-only runs still show PASS instead of "—".
-  // Rules: any fail → fail | any pass → pass | all ignored/skipped → skipped ("—")
+  // Rules: any fail → fail | any pass → pass | all ignored/skipped → use stored layer1Status
   const effectiveL1Status: LayerStatus = (() => {
-    if (!paramResults) return pair?.layer1Status ?? "skipped";
-    const vals = Object.values(paramResults);
-    if (vals.some(s => s === "fail"))  return "fail";
-    if (vals.some(s => s === "pass"))  return "pass";
-    return "skipped";
+    if (paramResults) {
+      const vals = Object.values(paramResults);
+      if (vals.some(s => s === "fail")) return "fail";
+      if (vals.some(s => s === "pass")) return "pass";
+    }
+    // Fall back to the layer1Status sent from the API (already correctly derived server-side)
+    const stored = pair?.layer1Status ?? "skipped";
+    // Normalize casing — API may return uppercase strings like "FAIL"
+    return (stored as string).toLowerCase() as LayerStatus;
   })();
 
   // Effective overall status — recomputed from current layer results so that
@@ -1149,7 +1161,7 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
               </div>
             )}
 
-            {cards.visualBreakdown && !vis && !pair.tableauScreenshot && !pair.powerBiScreenshot && (
+            {cards.visualBreakdown && !pair.tableauScreenshot && !pair.powerBiScreenshot && (
               <div className="bg-white border border-zinc-200 rounded-2xl shadow-sm p-5 flex items-center gap-4">
                 <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-xl shrink-0">🖼️</div>
                 <div>
