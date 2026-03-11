@@ -516,9 +516,38 @@ async def list_report_pairs(
     ).order_by(ReportPair.created_at.desc()).all()
     
     output = []
+    # Maps the diff-type label (from _visual_diff_type) → parameter key used in params_used.
+    # Only types that map 1:1 to a configurable parameter are listed here.
+    # Generic types (Filter Difference, Missing Element, etc.) are intentionally absent
+    # so they are always included in the regression log regardless of exclusions.
+    _DIFF_TYPE_TO_PARAM: dict[str, str] = {
+        "Chart Type Difference":   "chart_type",
+        "Color Scheme Difference": "color",
+        "Legend Difference":       "legend",
+        "Title Difference":        "title",
+        "Data Labels Difference":  "data_labels",
+        "Axis Labels Difference":  "axis_labels",
+        "Layout Difference":       "layout",
+        "Text Style Difference":   "text_content",
+    }
+
     for p in pairs:
         differences = []
-        
+
+        # Pre-compute visual result dict once — reused for layer1Status and diff filtering.
+        vis_dict = _build_visual_result_dict(p.visual_result) if p.visual_result else None
+
+        # Resolve which parameters are active for this pair (used to filter regression log).
+        if p.visual_result and p.visual_result.visual_parameters:
+            from visual.prompts import DEFAULT_PARAMS as _DEFAULT_PARAMS
+            _stored = json.loads(p.visual_result.visual_parameters)
+            _params_used: dict[str, bool] = {**_DEFAULT_PARAMS, **_stored}
+        elif p.visual_result:
+            from visual.prompts import DEFAULT_PARAMS as _DEFAULT_PARAMS
+            _params_used = dict(_DEFAULT_PARAMS)
+        else:
+            _params_used = {}
+
         # Layer 1: Relationships
         if p.relationship_result:
             for d in p.relationship_result.details:
@@ -529,22 +558,27 @@ async def list_report_pairs(
                         "severity": "high",
                         "layer": "L1"
                     })
-        
+
         # Layer 1: Visual (Mismatches from AI)
-        if p.visual_result and p.visual_result.status != "PASS":
-            if p.visual_result.ai_key_differences:
-                try:
-                    visual_diffs = json.loads(p.visual_result.ai_key_differences)
-                    for vd in visual_diffs:
-                        differences.append({
-                            "type": _visual_diff_type(vd),
-                            "detail": vd,
-                            "severity": "medium",
-                            "layer": "L1"
-                        })
-                except:
-                    pass
-        
+        # Only add a regression log entry when the difference's mapped parameter is NOT excluded.
+        if p.visual_result and p.visual_result.ai_key_differences:
+            try:
+                visual_diffs = json.loads(p.visual_result.ai_key_differences)
+                for vd in visual_diffs:
+                    diff_type = _visual_diff_type(vd)
+                    param_key = _DIFF_TYPE_TO_PARAM.get(diff_type)
+                    # If this diff maps to a known parameter and that parameter is excluded, skip it.
+                    if param_key and not _params_used.get(param_key, True):
+                        continue
+                    differences.append({
+                        "type": diff_type,
+                        "detail": vd,
+                        "severity": "medium",
+                        "layer": "L1"
+                    })
+            except:
+                pass
+
         # Layer 2: Semantic Model
         if p.semantic_result:
             for f in p.semantic_result.calc_fields:
@@ -555,7 +589,7 @@ async def list_report_pairs(
                         "severity": "high",
                         "layer": "L2"
                     })
-        
+
         # Layer 3: Data
         if p.data_result:
             for t in p.data_result.table_comparisons:
@@ -567,16 +601,31 @@ async def list_report_pairs(
                         "layer": "L3"
                     })
 
+        # Derive effective L1 status from parameterResults so excluded params don't cause FAIL.
+        # vis_dict["status"] is already computed by _build_visual_result_dict using params_used.
+        effective_l1 = vis_dict["status"] if vis_dict else "skipped"
+        l2_status    = _infer_semantic_status(p.semantic_result)
+        l3_status    = _infer_data_status(p.data_result)
+
+        # Recompute overall status from effective layer results — never use the stale stored value,
+        # because parameter exclusions may have changed L1 from FAIL → PASS after the original run.
+        # Rule: FAIL if any layer = FAIL, otherwise PASS.
+        effective_overall = (
+            "FAIL"
+            if any((s or "").upper() == "FAIL" for s in [effective_l1, l2_status, l3_status])
+            else "PASS"
+        )
+
         output.append({
             "id": str(p.id),
             "runId": str(p.run_id) if p.run_id else None,
             "reportName": p.report_name,
-            "overallStatus": p.overall_status,
-            "layer1Status": p.visual_result.status if p.visual_result else "skipped",
-            "layer2Status": _infer_semantic_status(p.semantic_result),
-            "layer3Status": _infer_data_status(p.data_result),
+            "overallStatus": effective_overall,
+            "layer1Status": effective_l1,
+            "layer2Status": l2_status,
+            "layer3Status": l3_status,
             "differences": differences,
-            "visualResult": _build_visual_result_dict(p.visual_result) if p.visual_result else None,
+            "visualResult": vis_dict,
             "tableauWorkbook": p.tableau_workbook,
             "powerbiReportName": p.powerbi_report_name,
             "tableauScreenshot": get_screenshot_url(p.tableau_screenshot),

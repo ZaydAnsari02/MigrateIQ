@@ -93,7 +93,9 @@ function deriveParamResults(
 
   // New format: use pre-computed parameterResults from the backend
   if (vis.parameterResults) {
-    const base: Record<string, string> = { ...(vis.parameterResults as Record<string, string>) };
+    const base: Record<string, string> = Object.fromEntries(
+      Object.entries(vis.parameterResults)
+    );
     // Apply user exclusion overrides on top
     for (const key of Object.keys(excluded) as (keyof ExcludedParameters)[]) {
       if (excluded[key] && key in base) base[key as string] = "ignored";
@@ -123,6 +125,7 @@ function deriveParamResults(
 interface ComparisonExplorerProps {
   pairs: ReportPair[];
   initialLeftId?: string;
+  onRefresh?: () => Promise<void>;
 }
 
 // ── Small helpers ─────────────────────────────────────────────────────────────
@@ -186,7 +189,7 @@ function StatusPill({ status }: { status: string }) {
 
 // ── Main Component ────────────────────────────────────────────────────────────
 
-export function ComparisonExplorer({ pairs, initialLeftId }: ComparisonExplorerProps) {
+export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: ComparisonExplorerProps) {
   const [selectedId, setSelectedId]       = useState<string>(initialLeftId ?? pairs[0]?.id ?? "");
   const [excluded, setExcluded]           = useState<ExcludedParameters>({ ...DEFAULT_EXCLUDED_PARAMS });
   const [cards, setCards]                 = useState<CardVisibility>({ ...DEFAULT_CARD_VISIBILITY });
@@ -229,6 +232,8 @@ export function ComparisonExplorer({ pairs, initialLeftId }: ComparisonExplorerP
       });
       if (!res.ok) throw new Error(await res.text());
       setLiveResult(await res.json());
+      // Refresh pairs list so sidebar / dashboard / runs reflect the updated statuses.
+      await onRefresh?.();
     } catch (e: any) {
       setLiveResult({ error: e.message ?? "Validation failed" });
     } finally {
@@ -300,6 +305,17 @@ export function ComparisonExplorer({ pairs, initialLeftId }: ComparisonExplorerP
     if (vals.some(s => s === "fail"))  return "fail";
     if (vals.some(s => s === "pass"))  return "pass";
     return "skipped";
+  })();
+
+  // Effective overall status — recomputed from current layer results so that
+  // parameter exclusions propagate to the header badge, sidebar, and dashboard
+  // without waiting for the next full page reload.
+  const effectiveOverallStatus: string = (() => {
+    const l1 = effectiveL1Status;
+    const l2 = pair?.layer2Status ?? "skipped";
+    const l3 = pair?.layer3Status ?? "skipped";
+    if ([l1, l2, l3].some(s => (s ?? "").toUpperCase() === "FAIL")) return "FAIL";
+    return "PASS";
   })();
 
   const filteredParamEntries = paramResults
@@ -413,7 +429,7 @@ export function ComparisonExplorer({ pairs, initialLeftId }: ComparisonExplorerP
                     );
                   })}
                 </div>
-                <StatusBadge status={pair.overallStatus} />
+                <StatusBadge status={effectiveOverallStatus} />
               </div>
             </div>
 

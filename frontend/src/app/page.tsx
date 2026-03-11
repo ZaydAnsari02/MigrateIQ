@@ -295,6 +295,16 @@ export default function DashboardPage() {
 
   // ── Load all data on mount ──────────────────────────────────────────────
 
+  const fetchPairs = useCallback(async () => {
+    const [runsData, pairsData] = await Promise.all([
+      validationService.listRuns(),
+      validationService.listReportPairs(),
+    ]);
+    setLiveRuns(runsData.map(backendRunToValidationRun));
+    setLivePairs(pairsData.map(backendResultToReportPair));
+    return pairsData.length;
+  }, []);
+
   useEffect(() => {
     const init = async () => {
       try {
@@ -305,16 +315,9 @@ export default function DashboardPage() {
           return;
         }
 
-        // 1. Load Runs
-        const runsData = await validationService.listRuns();
-        setLiveRuns(runsData.map(backendRunToValidationRun));
-
-        // 2. Load all Report Pairs
-        const pairsData = await validationService.listReportPairs();
-        setLivePairs(pairsData.map(backendResultToReportPair));
-
-        if (pairsData.length > 0) {
-          addNotification("info", "Results loaded", `${pairsData.length} validation result${pairsData.length !== 1 ? "s" : ""} loaded from server.`);
+        const count = await fetchPairs();
+        if (count > 0) {
+          addNotification("info", "Results loaded", `${count} validation result${count !== 1 ? "s" : ""} loaded from server.`);
         }
       } catch (err) {
         console.error("Failed to load initial data:", err);
@@ -322,7 +325,7 @@ export default function DashboardPage() {
       }
     };
     init();
-  }, [addNotification]);
+  }, [addNotification, fetchPairs]);
 
   // ── Start Validation ─────────────────────────────────────────────────────
   //
@@ -346,12 +349,7 @@ export default function DashboardPage() {
       setLivePairs(prev => [pair, ...prev]);
 
       // Refresh lists
-      const [runsData, pairsData] = await Promise.all([
-        validationService.listRuns(),
-        validationService.listReportPairs()
-      ]);
-      setLiveRuns(runsData.map(backendRunToValidationRun));
-      setLivePairs(pairsData.map(backendResultToReportPair));
+      await fetchPairs();
 
       if (pair.overallStatus === "PASS") {
         addNotification("success", "Validation passed", `"${pair.reportName}" passed all three layers.`);
@@ -372,7 +370,7 @@ export default function DashboardPage() {
       setStartLoading(false);
       setUploadPct(0);
     }
-  }, [upload, selection, addNotification]);
+  }, [upload, selection, addNotification, fetchPairs]);
 
   // ── Load a past result by run ID (called from RunsTable "View" action) ───
 
@@ -547,6 +545,7 @@ export default function DashboardPage() {
               <ComparisonExplorer
                 pairs={livePairs}
                 initialLeftId={explorerSelection}
+                onRefresh={() => fetchPairs().then(() => {})}
               />
             )}
 
