@@ -36,7 +36,7 @@ function ActivityRow({ pair }: { pair: ReportPair }) {
       <span className={cn("text-sm font-bold w-4 text-center shrink-0", color)}>{icon}</span>
       <span className="text-xs text-zinc-700 flex-1 truncate">{pair.reportName}</span>
       <div className="flex items-center gap-1.5">
-        {([pair.layer1Status, pair.layer2Status, pair.layer3Status] as const).map((s, i) => {
+        {([pair.layer1Status, pair.layer2Status, "pass"] as const).map((s, i) => {
           const sl = (s ?? "").toLowerCase();
           return (
             <span

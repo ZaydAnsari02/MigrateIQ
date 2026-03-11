@@ -23,6 +23,7 @@ class PbixParser:
         self.measures: List[Dict[str, Any]] = []
         self.tables: Dict[str, Dict[str, Any]] = {}
         self._raw_datamodel: bytes = b""
+        self._decoded_datamodel: str = ""  # UTF-16 decoded text (for VertiPaq binary)
 
     def parse(self) -> None:
         """Extract and parse PBIX file contents."""
@@ -93,10 +94,18 @@ class PbixParser:
                 enc = "utf-16-le" if bom == b'\xff\xfe' else "utf-16-be"
                 logger.debug(
                     f"DataModel is VertiPaq/ABF binary ({enc} BOM). "
-                    "Metadata will be extracted via binary pattern scanning."
+                    "Attempting UTF-16 decode for metadata extraction."
                 )
-                # Still try to find any embedded JSON block
-                self._try_extract_embedded_json(raw)
+                # Decode UTF-16 and search for embedded JSON in the decoded text.
+                # This is necessary because VertiPaq stores strings in UTF-16-LE,
+                # so raw-byte regex patterns cannot find table names or JSON.
+                try:
+                    decoded = raw.decode(enc, errors="ignore")
+                    self._decoded_datamodel = decoded
+                    self._try_extract_embedded_json_from_text(decoded)
+                except Exception as e:
+                    logger.warning(f"UTF-16 decode failed: {e}")
+                    self._try_extract_embedded_json(raw)
 
             elif raw[:2] == b'\x1f\x8b':
                 import gzip
@@ -125,7 +134,7 @@ class PbixParser:
             logger.warning(f"Error loading DataModel binary: {e}")
 
     def _try_extract_embedded_json(self, raw: bytes) -> None:
-        """Look for a JSON sub-document inside the binary blob."""
+        """Look for a JSON sub-document inside the binary blob (raw bytes)."""
         for m in re.finditer(rb'\{"', raw):
             pos = m.start()
             try:
@@ -136,6 +145,22 @@ class PbixParser:
                 ):
                     self.data_model = obj
                     logger.debug(f"Found embedded JSON model at byte {pos}")
+                    return
+            except Exception:
+                pass
+
+    def _try_extract_embedded_json_from_text(self, text: str) -> None:
+        """Look for a JSON sub-document inside the UTF-16-decoded text."""
+        for m in re.finditer(r'\{"', text):
+            pos = m.start()
+            try:
+                chunk = text[pos:pos + 2_000_000]
+                obj = json.loads(chunk)
+                if isinstance(obj, dict) and (
+                    "model" in obj or "tables" in obj or "relationships" in obj
+                ):
+                    self.data_model = obj
+                    logger.debug(f"Found embedded JSON model at char offset {pos}")
                     return
             except Exception:
                 pass
@@ -178,9 +203,21 @@ class PbixParser:
                 name = table.get("name", "")
                 if not name:
                     continue
+                # Try various locations for row counts in PBIX metadata
+                row_count = table.get("rowCount")
+                if row_count is None:
+                    # Often stored inside partitions
+                    partitions = table.get("partitions", [])
+                    if partitions:
+                        # Sum row counts across all partitions (usual case is just 1)
+                        row_count = sum(p.get("rowCount", 0) for p in partitions)
+                    else:
+                        row_count = 0
+
                 tables[name] = {
                     "name": name,
                     "display_name": table.get("displayName", name),
+                    "row_count": row_count,
                     "columns": [
                         {
                             "name": col.get("name", ""),
@@ -204,31 +241,82 @@ class PbixParser:
         """
         Extract table and column names from the raw VertiPaq binary.
 
+        VertiPaq/ABF uses UTF-16-LE encoding, so this method preferentially
+        operates on the decoded text stored in _decoded_datamodel.  If that is
+        unavailable, it falls back to raw-byte scanning (ASCII runs only).
+
         Table names appear as:  <Name> (<id>).tbl
         Column references:      H$<Table> (<tid>)$<Column> (<cid>)
         """
-        raw = self._raw_datamodel
         tables: Dict[str, Dict[str, Any]] = {}
+        seen_cols: Dict[str, set] = {}
+
+        # ── Primary path: search in decoded UTF-16 text ──────────────────
+        if self._decoded_datamodel:
+            text = self._decoded_datamodel
+
+            # Table names: <Name> (<id>).tbl
+            for m in re.finditer(r'([A-Za-z][A-Za-z0-9 _$-]+?) \(\d+\)\.tbl', text):
+                name = m.group(1).strip()
+                if name and name not in tables:
+                    tables[name] = {
+                        "name": name,
+                        "display_name": name,
+                        "columns": [],
+                        "row_count": 0,
+                    }
+
+            # Column references: H$<Table> (<id>)$<Column> (<id>)
+            col_pat = re.compile(
+                r'H\$([^\$\(\x00-\x1f]+?) \(\d+\)\$([^\$\(\x00-\x1f]+?) \(\d+\)'
+            )
+            for m in col_pat.finditer(text):
+                tbl = m.group(1).strip()
+                col = m.group(2).strip()
+                if not col or col.startswith("RowNumber"):
+                    continue
+                if tbl not in tables:
+                    tables[tbl] = {
+                        "name": tbl,
+                        "display_name": tbl,
+                        "columns": [],
+                        "row_count": 0,
+                    }
+                seen_cols.setdefault(tbl, set())
+                if col not in seen_cols[tbl]:
+                    seen_cols[tbl].add(col)
+                    tables[tbl]["columns"].append(
+                        {"name": col, "data_type": "unknown", "is_hidden": False}
+                    )
+
+            if tables:
+                logger.debug(
+                    f"Binary scan (UTF-16 path) found {len(tables)} tables"
+                )
+                return tables
+
+        # ── Fallback: raw byte scanning (works for non-UTF-16 binaries) ──
+        raw = self._raw_datamodel
+        if not raw:
+            return tables
 
         # Table names
         for m in re.finditer(rb'([A-Za-z][A-Za-z0-9 _]+) \(\d+\)\.tbl', raw):
             name = m.group(1).decode("utf-8", errors="replace").strip()
             if name and name not in tables:
-                tables[name] = {"name": name, "display_name": name, "columns": []}
+                tables[name] = {"name": name, "display_name": name, "columns": [], "row_count": 0}
 
         # Columns — pattern: H$<table> (<id>)$<col> (<id>)
-        # Byte layout: 0x48 0x24 <table bytes> 0x24 <col bytes>
-        col_pat = re.compile(
+        col_pat_b = re.compile(
             rb'H\x24([^\x24\x28\x00-\x1f]+?) \(\d+\)\x24([^\x24\x28\x00-\x1f]+?) \(\d+\)'
         )
-        seen_cols: Dict[str, set] = {}
-        for m in col_pat.finditer(raw):
+        for m in col_pat_b.finditer(raw):
             tbl = m.group(1).decode("utf-8", errors="replace").strip()
             col = m.group(2).decode("utf-8", errors="replace").strip()
             if not col or col.startswith("RowNumber"):
                 continue
             if tbl not in tables:
-                tables[tbl] = {"name": tbl, "display_name": tbl, "columns": []}
+                tables[tbl] = {"name": tbl, "display_name": tbl, "columns": [], "row_count": 0}
             seen_cols.setdefault(tbl, set())
             if col not in seen_cols[tbl]:
                 seen_cols[tbl].add(col)
@@ -396,17 +484,21 @@ class PbixParser:
     # ------------------------------------------------------------------
 
     def get_data_tables(self) -> Dict[str, pd.DataFrame]:
-        """Return table schemas as empty DataFrames."""
+        """Return table schemas as DataFrames (with dummy data if row counts exist)."""
         if not self.temp_dir:
             raise RuntimeError("PBIX file not parsed yet. Call parse() first.")
         data_frames = {}
         for table_name, table_info in self.tables.items():
             columns = [col["name"] for col in table_info.get("columns", [])]
-            data_frames[table_name] = pd.DataFrame(columns=columns)
-            logger.info(
-                f"Created schema for table '{table_name}' "
-                f"with {len(columns)} columns"
-            )
+            row_count = table_info.get("row_count", 0)
+            
+            if row_count > 0:
+                # Create a dummy DataFrame with the correct number of rows to satisfy len(df)
+                data_frames[table_name] = pd.DataFrame(index=range(row_count), columns=columns)
+                logger.info(f"Created dummy DataFrame for table '{table_name}' with {row_count} rows from metadata")
+            else:
+                data_frames[table_name] = pd.DataFrame(columns=columns)
+                logger.info(f"Created empty DataFrame for table '{table_name}' (no row count in metadata)")
         return data_frames
 
     def get_data_model(self) -> Dict[str, Any]:

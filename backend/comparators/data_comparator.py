@@ -27,11 +27,28 @@ def _norm_col(name: str) -> str:
 # ---------------------------------------------------------------------------
 # Fuzzy string similarity
 # ---------------------------------------------------------------------------
+def _norm_table_name(name: str) -> str:
+    """
+    Normalise a table name for fuzzy matching.
+    Strips spaces, underscores, and hyphens; converts to lowercase.
+    """
+    return re.sub(r"[ _\-]+", "", name.lower().strip())
+
+
 def _name_similarity(a: str, b: str) -> float:
-    """Return 0–1 similarity between two table names (case-insensitive)."""
-    return SequenceMatcher(
-        None, a.lower().strip(), b.lower().strip()
-    ).ratio()
+    """
+    Return 0–1 similarity between two table names.
+
+    Tries two strategies and returns the maximum:
+      1. Direct similarity on lowercased names (catches prefix/suffix diffs).
+      2. Similarity after stripping separators (catches spacing/underscore diffs).
+    """
+    a_lo, b_lo = a.lower().strip(), b.lower().strip()
+    score1 = SequenceMatcher(None, a_lo, b_lo).ratio()
+    # Also compare normalised (separators removed) versions
+    a_norm, b_norm = _norm_table_name(a), _norm_table_name(b)
+    score2 = SequenceMatcher(None, a_norm, b_norm).ratio() if (a_norm and b_norm) else 0.0
+    return max(score1, score2)
 
 
 # ---------------------------------------------------------------------------
@@ -44,8 +61,8 @@ def _name_similarity(a: str, b: str) -> float:
 #
 # A TWBX table and a PBIX table can only be matched once (greedy best-first).
 # ---------------------------------------------------------------------------
-FUZZY_THRESHOLD = 0.6      # minimum similarity to accept a fuzzy name match
-OVERLAP_THRESHOLD = 0.5    # minimum column overlap ratio to accept a column match
+FUZZY_THRESHOLD = 0.55     # minimum similarity to accept a fuzzy name match
+OVERLAP_THRESHOLD = 0.4    # minimum column overlap ratio to accept a column match
 
 
 def _col_overlap(twbx_cols: List[str], pbix_cols: List[str]) -> float:
@@ -249,20 +266,34 @@ class DataComparator:
             if verbose:
                 logger.info(f"[TABLE NAME NOTE] {match['name_note']}")
 
+        # ── Row count ───────────────────────────────────────────────────
+        twbx_df = twbx_tables.get(twbx_name) if twbx_name else None
+        pbix_df = pbix_tables.get(pbix_name) if pbix_name else None
+        
+        twbx_rows = len(twbx_df) if twbx_df is not None else 0
+        pbix_rows = len(pbix_df) if pbix_df is not None else 0
+        
+        result["row_count_twbx"] = twbx_rows
+        result["row_count_pbix"] = pbix_rows
+
         # ── Unmatched table → hard FAIL ─────────────────────────────────
         if match["match_method"] == "unmatched":
             result["result"] = "FAIL"
             result["failure_reasons"].append(match["name_note"])
+            # Populate missing column lists so the UI can show what columns exist
+            if twbx_name and twbx_name in twbx_tables:
+                result["columns_missing_in_pbix"] = sorted(twbx_tables[twbx_name].columns.tolist())
+            elif pbix_name and pbix_name in pbix_tables:
+                result["columns_missing_in_twbx"] = sorted(pbix_tables[pbix_name].columns.tolist())
+            
+            # Record diff pct if one side is 0
+            if twbx_rows == 0 or pbix_rows == 0:
+                result["row_count_diff_pct"] = 100.0 if (twbx_rows + pbix_rows) > 0 else 0.0
+            
             return result
 
         twbx_df = twbx_tables[twbx_name]
         pbix_df = pbix_tables[pbix_name]
-
-        # ── Row count ───────────────────────────────────────────────────
-        twbx_rows = len(twbx_df)
-        pbix_rows = len(pbix_df)
-        result["row_count_twbx"] = twbx_rows
-        result["row_count_pbix"] = pbix_rows
 
         if twbx_rows == 0 and pbix_rows == 0:
             result["row_count_diff_pct"] = 0.0
@@ -427,6 +458,10 @@ class DataComparator:
             # Skip tables that could not be paired
             if match["match_method"] == "unmatched":
                 display = twbx_name or pbix_name or "Unknown"
+                twbx_cols = list(twbx_tables[twbx_name].columns) if twbx_name and twbx_name in twbx_tables else []
+                pbix_cols = list(pbix_tables[pbix_name].columns) if pbix_name and pbix_name in pbix_tables else []
+                unmatched_twbx_rows = len(twbx_tables[twbx_name]) if twbx_name and twbx_name in twbx_tables else 0
+                unmatched_pbix_rows = len(pbix_tables[pbix_name]) if pbix_name and pbix_name in pbix_tables else 0
                 results.append({
                     "table_name": display,
                     "twbx_name": twbx_name,
@@ -437,6 +472,10 @@ class DataComparator:
                     "columns_analyzed": 0,
                     "mismatched_columns": 0,
                     "failure_reasons": [match["name_note"]],
+                    "twbx_columns": twbx_cols,
+                    "pbix_columns": pbix_cols,
+                    "twbx_row_count": unmatched_twbx_rows,
+                    "pbix_row_count": unmatched_pbix_rows,
                 })
                 continue
 
@@ -456,6 +495,8 @@ class DataComparator:
                 "columns_analyzed": len(matched_norm),
                 "mismatched_columns": 0,
                 "failure_reasons": [],
+                "twbx_row_count": len(twbx_df),
+                "pbix_row_count": len(pbix_df),
             }
 
             for norm_name in matched_norm:

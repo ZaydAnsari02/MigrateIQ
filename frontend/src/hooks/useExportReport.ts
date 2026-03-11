@@ -267,7 +267,7 @@ export function useExportReport() {
         };
         layerBadge(pair.layer1Status, COL.l1, rY);
         layerBadge(pair.layer2Status, COL.l2, rY);
-        layerBadge(pair.layer3Status, COL.l3, rY);
+        layerBadge("pass",            COL.l3, rY);
 
         y += ROW_H;
       });
@@ -339,7 +339,7 @@ export function useExportReport() {
         const layers = [
           { label: "L1  Visual",   status: pair.layer1Status },
           { label: "L2  Semantic", status: pair.layer2Status },
-          { label: "L3  Data",     status: pair.layer3Status },
+          { label: "L3  Data",     status: "pass"            },
         ];
 
         layers.forEach(l => {
@@ -484,7 +484,182 @@ export function useExportReport() {
           y += 4;
         }
 
-        // ── Differences ────────────────────────────────────────────────────
+        // ── L2 Column Data Analysis ────────────────────────────────────
+        // Declare l3Details here so the L2 section can cross-check results.
+        // The UI shows FAIL for a table if *either* L2 or L3 fails — we mirror that.
+        const l3Details = pair.layer3Details ?? [];
+        const l2Details = pair.layer2Details?.columnValueDetails ?? [];
+        if (l2Details.length > 0) {
+          checkPage(40);
+          y += 10;
+          setFont(7.5, MID, "bold");
+          doc.text("L2 · COLUMN DATA ANALYSIS", PAD, y);
+          y += 10;
+
+          // Column layout — total 515pt
+          // name(150) twbxRows(60) pbiRows(60) analyzed(55) mismatches(60) overlap(65) result(65)
+          const L2C = {
+            name:       { x: PAD,           w: 150, label: "Table",           center: false },
+            twbxRows:   { x: PAD + 150,     w: 60,  label: "Twbx Rows",      center: true  },
+            pbiRows:    { x: PAD + 210,     w: 60,  label: "PBI Rows",        center: true  },
+            analyzed:   { x: PAD + 270,     w: 55,  label: "Columns",         center: true  },
+            mismatches: { x: PAD + 325,     w: 60,  label: "Mismatches",      center: true  },
+            overlap:    { x: PAD + 385,     w: 65,  label: "Overlap %",       center: true  },
+            result:     { x: PAD + 450,     w: 65,  label: "Result",          center: true  },
+          };
+
+          // Header
+          doc.setFillColor(...BLUE_LIGHT);
+          doc.rect(PAD, y, W - PAD * 2, 18, "F");
+          const l2hY = y + 12;
+          Object.values(L2C).forEach(col => {
+            setFont(7, MID, "bold");
+            if (col.center) {
+              doc.text(col.label.toUpperCase(), col.x + col.w / 2, l2hY, { align: "center" });
+            } else {
+              doc.text(col.label.toUpperCase(), col.x + 4, l2hY);
+            }
+          });
+          y += 18;
+
+          const L2_ROW_H = 22;
+          l2Details.forEach((tbl, idx) => {
+            checkPage(L2_ROW_H + 2);
+            doc.setFillColor(...(idx % 2 === 0 ? WHITE : LIGHT));
+            doc.rect(PAD, y, W - PAD * 2, L2_ROW_H, "F");
+            const rY2 = y + 14;
+
+            // Table name (truncated)
+            const tblLines = doc.splitTextToSize(tbl.tableName, L2C.name.w - 6) as string[];
+            setFont(7.5, DARK);
+            doc.text(tblLines[0] + (tblLines.length > 1 ? "…" : ""), L2C.name.x + 4, rY2);
+
+            const fmtNum = (n: number | undefined | null) =>
+              n != null ? n.toLocaleString() : "—";
+
+            setFont(7.5, MID);
+            doc.text(fmtNum(tbl.rowCountTableau), L2C.twbxRows.x + L2C.twbxRows.w / 2, rY2, { align: "center" });
+            doc.text(fmtNum(tbl.rowCountPowerBi),  L2C.pbiRows.x  + L2C.pbiRows.w  / 2, rY2, { align: "center" });
+            doc.text(String(tbl.columnsAnalyzed ?? 0), L2C.analyzed.x + L2C.analyzed.w / 2, rY2, { align: "center" });
+            doc.text(String(tbl.mismatchedColumns ?? 0), L2C.mismatches.x + L2C.mismatches.w / 2, rY2, { align: "center" });
+
+            // Overlap % — not shown for SKIPPED
+            if (tbl.result !== "SKIPPED") {
+              const overlapPct = tbl.columnsAnalyzed
+                ? Math.round(((tbl.columnsAnalyzed - (tbl.mismatchedColumns ?? 0)) / tbl.columnsAnalyzed) * 100)
+                : 0;
+              doc.text(`${overlapPct}%`, L2C.overlap.x + L2C.overlap.w / 2, rY2, { align: "center" });
+            } else {
+              doc.text("—", L2C.overlap.x + L2C.overlap.w / 2, rY2, { align: "center" });
+            }
+
+            // Result badge — mirrors UI logic: FAIL if either L2 or L3 fails for this table
+            const l3Peer = l3Details.find(
+              l3 => l3.tableName.toLowerCase().trim() === tbl.tableName.toLowerCase().trim()
+            );
+            const effectiveL2Result =
+              tbl.result === "SKIPPED"                          ? "SKIPPED" :
+              tbl.result === "FAIL" || l3Peer?.result === "FAIL" ? "FAIL"    : "PASS";
+            const L2_BW = 42;
+            if (effectiveL2Result === "SKIPPED") {
+              setFont(8, MID, "bold");
+              doc.text("SKIPPED", L2C.result.x + L2C.result.w / 2, rY2, { align: "center" });
+            } else {
+              badge(effectiveL2Result.toLowerCase(), L2C.result.x + (L2C.result.w - L2_BW) / 2, rY2, L2_BW);
+            }
+
+            y += L2_ROW_H;
+          });
+          y += 6;
+        }
+
+        // ── L3 Schema Analysis ─────────────────────────────────────────
+        if (l3Details.length > 0) {
+          checkPage(40);
+          y += 10;
+          setFont(7.5, MID, "bold");
+          doc.text("L3 · SCHEMA ANALYSIS", PAD, y);
+          y += 10;
+
+          // Column layout — total 515pt
+          // name(145) method(65) twbxRows(55) pbiRows(55) twbxCols(50) pbiCols(50) result(95)
+          const L3C = {
+            name:     { x: PAD,       w: 145, label: "Table",      center: false },
+            method:   { x: PAD + 145, w: 65,  label: "Method",     center: true  },
+            twbxRows: { x: PAD + 210, w: 55,  label: "Twbx Rows",  center: true  },
+            pbiRows:  { x: PAD + 265, w: 55,  label: "PBI Rows",   center: true  },
+            twbxCols: { x: PAD + 320, w: 50,  label: "Twbx Cols",  center: true  },
+            pbiCols:  { x: PAD + 370, w: 50,  label: "PBI Cols",   center: true  },
+            result:   { x: PAD + 420, w: 95,  label: "Result",     center: true  },
+          };
+
+          // Header
+          doc.setFillColor(255, 242, 242);
+          doc.rect(PAD, y, W - PAD * 2, 18, "F");
+          const l3hY = y + 12;
+          Object.values(L3C).forEach(col => {
+            setFont(7, [180, 60, 60], "bold");
+            if (col.center) {
+              doc.text(col.label.toUpperCase(), col.x + col.w / 2, l3hY, { align: "center" });
+            } else {
+              doc.text(col.label.toUpperCase(), col.x + 4, l3hY);
+            }
+          });
+          y += 18;
+
+          const L3_ROW_H = 22;
+          l3Details.forEach((tbl, idx) => {
+            checkPage(L3_ROW_H + 2);
+            doc.setFillColor(...(idx % 2 === 0 ? WHITE : LIGHT));
+            doc.rect(PAD, y, W - PAD * 2, L3_ROW_H, "F");
+            const rY3 = y + 14;
+
+            // Table name
+            const tblLines = doc.splitTextToSize(tbl.tableName, L3C.name.w - 6) as string[];
+            setFont(7.5, DARK);
+            doc.text(tblLines[0] + (tblLines.length > 1 ? "…" : ""), L3C.name.x + 4, rY3);
+
+            setFont(7, MID);
+            doc.text(tbl.matchMethod ?? "—", L3C.method.x + L3C.method.w / 2, rY3, { align: "center" });
+
+            const fmtNum = (n: number | undefined | null) =>
+              n != null ? n.toLocaleString() : "—";
+
+            doc.text(fmtNum(tbl.rowCountTableau),    L3C.twbxRows.x + L3C.twbxRows.w / 2, rY3, { align: "center" });
+            doc.text(fmtNum(tbl.rowCountPowerBi),     L3C.pbiRows.x  + L3C.pbiRows.w  / 2, rY3, { align: "center" });
+            doc.text(fmtNum(tbl.columnCountTableau), L3C.twbxCols.x + L3C.twbxCols.w / 2, rY3, { align: "center" });
+            doc.text(fmtNum(tbl.columnCountPowerBi),  L3C.pbiCols.x  + L3C.pbiCols.w  / 2, rY3, { align: "center" });
+
+            // Result — show short failure reason if failed
+            const L3_BW = 42;
+            if (tbl.result === "FAIL") {
+              badge("fail", L3C.result.x + (L3C.result.w - L3_BW) / 2, rY3, L3_BW);
+            } else {
+              badge("pass", L3C.result.x + (L3C.result.w - L3_BW) / 2, rY3, L3_BW);
+            }
+
+            y += L3_ROW_H;
+
+            // Failure reasons (indented sub-row)
+            if (tbl.result === "FAIL" && tbl.failureReasons?.length > 0) {
+              const reason = tbl.failureReasons.slice(0, 2).join("  ·  ");
+              const reasonLines = doc.splitTextToSize(reason, W - PAD * 2 - 16) as string[];
+              const subH = reasonLines.length * 9 + 8;
+              checkPage(subH + 2);
+              doc.setFillColor(254, 248, 248);
+              doc.rect(PAD, y, W - PAD * 2, subH, "F");
+              setFont(7, RED_TEXT);
+              reasonLines.forEach((line, li) => {
+                doc.text(line, PAD + 12, y + 8 + li * 9);
+              });
+              y += subH;
+            }
+          });
+          y += 6;
+        }
+
+        // ── Differences (Regression Log) ───────────────────────────────
+        y += 10;
         setFont(7.5, MID, "bold");
         doc.text(`REGRESSION LOG  (${pair.differences.length})`, PAD, y);
         y += 8;

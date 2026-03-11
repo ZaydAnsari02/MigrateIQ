@@ -77,6 +77,10 @@ export interface TableColumnValueDetail {
   mismatchedColumns: number;
   failureReasons: string[];
   columnAnalyses: ColumnValueAnalysis[];
+  twbxColumns?: string[];
+  pbixColumns?: string[];
+  rowCountTableau?: number;
+  rowCountPowerBi?: number;
 }
 
 export interface Layer2Details {

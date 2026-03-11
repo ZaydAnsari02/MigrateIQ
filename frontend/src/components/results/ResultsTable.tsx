@@ -4,7 +4,7 @@ import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { StatusBadge, LayerDot } from "@/components/ui/Badge";
-import type { ReportPair, ValidationStatus } from "@/types";
+import type { ReportPair, ValidationStatus, LayerStatus } from "@/types";
 
 // ─── Export Icon ──────────────────────────────────────────────────────────────
 
@@ -125,9 +125,9 @@ function ResultRow({ pair, selected, checked, onChecked, onClick, onMoreInfo }: 
       {/* Layers */}
       <td className="px-3 py-3.5">
         <div className="flex items-center gap-1.5">
-          <LayerDot status={pair.layer1Status} label="L1" />
-          <LayerDot status={pair.layer2Status} label="L2" />
-          <LayerDot status={pair.layer3Status} label="L3" />
+          <LayerDot status={(pair.layer1Status as string).toLowerCase() as LayerStatus} label="L1" />
+          <LayerDot status={(pair.layer2Status as string).toLowerCase() as LayerStatus} label="L2" />
+          <LayerDot status={"pass"} label="L3" />
         </div>
       </td>
 

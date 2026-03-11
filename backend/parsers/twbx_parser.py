@@ -407,6 +407,22 @@ class TwbxParser:
                         logger.warning(f"Error reading CSV {fp}: {e}")
         return data_frames
 
+    def _extract_excel_data(self) -> Dict[str, pd.DataFrame]:
+        """Extract data from Excel files embedded in TWBX."""
+        data_frames: Dict[str, pd.DataFrame] = {}
+        for root, dirs, files in os.walk(self.temp_dir):
+            for file in files:
+                if file.endswith(".xlsx") or file.endswith(".xls"):
+                    fp = os.path.join(root, file)
+                    try:
+                        table_name = Path(file).stem
+                        # Read the first sheet by default
+                        data_frames[table_name] = pd.read_excel(fp)
+                        logger.info(f"Loaded Excel data from {file}")
+                    except Exception as e:
+                        logger.warning(f"Error reading Excel {fp}: {e}")
+        return data_frames
+
     def get_data_tables(self) -> Dict[str, pd.DataFrame]:
         """
         Return actual data tables from TWBX.
@@ -431,6 +447,9 @@ class TwbxParser:
 
         if not data_frames:
             data_frames.update(self._extract_csv_data())
+
+        if not data_frames:
+            data_frames.update(self._extract_excel_data())
 
         # Last resort: build schema-only DataFrames from physical table defs
         if not data_frames:

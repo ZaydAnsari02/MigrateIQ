@@ -664,6 +664,10 @@ async def list_report_pairs(
                         "columnsAnalyzed":    tbl.get("columns_analyzed", 0),
                         "mismatchedColumns":  tbl.get("mismatched_columns", 0),
                         "failureReasons":     tbl.get("failure_reasons", []),
+                        "twbxColumns":        tbl.get("twbx_columns", []),
+                        "pbixColumns":        tbl.get("pbix_columns", []),
+                        "rowCountTableau":    tbl.get("twbx_row_count"),
+                        "rowCountPowerBi":    tbl.get("pbix_row_count"),
                         "columnAnalyses": [
                             {
                                 "columnName":          col.get("column_name"),
@@ -777,6 +781,12 @@ async def get_result(run_id: str, db: Session = Depends(get_db)):
                     {
                         "table_name": t.table_name,
                         "result": t.result,
+                        "match_method": t.match_method or "unknown",
+                        "row_count_twbx": t.row_count_twbx,
+                        "row_count_pbix": t.row_count_pbix,
+                        "row_count_diff_pct": t.row_count_diff_pct,
+                        "column_count_twbx": t.column_count_twbx,
+                        "column_count_pbix": t.column_count_pbix,
                         "failure_reasons": t.failure_reasons.split(", ") if t.failure_reasons else []
                     } for t in (pair.data_result.table_comparisons if pair.data_result else [])
                 ]
@@ -788,6 +798,10 @@ async def get_result(run_id: str, db: Session = Depends(get_db)):
                         f.differences for f in (pair.semantic_result.calc_fields if pair.semantic_result else []) 
                         if f.status != "MATCH" and f.differences
                     ]
+                },
+                "column_value_analysis": {
+                    "result": pair.semantic_result.column_value_status if pair.semantic_result else "PENDING",
+                    "details": json.loads(pair.semantic_result.column_value_details or "[]") if pair.semantic_result else []
                 }
             },
             "relationships": {
