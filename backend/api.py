@@ -101,10 +101,15 @@ async def validate_reports(
     pbi_screenshot: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     x_token: Optional[str] = Header(None),
+    x_username: Optional[str] = Header(None),
 ):
     import traceback
-    # Resolve the username from the session token (fall back to "Web UI")
-    triggered_by = SESSIONS.get(x_token, "Web UI") if x_token else "Web UI"
+    # Resolve the username: prefer session store, fall back to x-username header, then "Web UI"
+    triggered_by = (
+        SESSIONS.get(x_token)
+        or x_username
+        or "Web UI"
+    ) if x_token else (x_username or "Web UI")
 
     try:
         run_id = str(uuid.uuid4())
@@ -307,6 +312,41 @@ def _visual_diff_type(detail: str) -> str:
     return "Visual Difference"
 
 
+# ─── Layer-status helpers ─────────────────────────────────────────────────────
+
+def _infer_semantic_status(sem) -> str:
+    """Return the true layer-2 status, inferring from field data when stored status is PENDING."""
+    if sem is None:
+        return "skipped"
+    s = (sem.status or "PENDING").upper()
+    if s not in ("PENDING", ""):
+        return s
+    # Infer: any flagged/mismatched calc fields → FAIL
+    if sem.flagged_fields and sem.flagged_fields > 0:
+        return "FAIL"
+    if any(getattr(cf, "status", None) not in ("MATCH", "PASS", None) for cf in (sem.calc_fields or [])):
+        return "FAIL"
+    if sem.matched_fields and sem.matched_fields > 0:
+        return "PASS"
+    return "PENDING"
+
+
+def _infer_data_status(dat) -> str:
+    """Return the true layer-3 status, inferring from table comparisons when stored status is PENDING."""
+    if dat is None:
+        return "skipped"
+    s = (dat.status or "PENDING").upper()
+    if s not in ("PENDING", ""):
+        return s
+    # Infer: any failing table comparison → FAIL
+    comparisons = dat.table_comparisons or []
+    if any(getattr(t, "result", None) not in ("PASS", "pass", None) for t in comparisons):
+        return "FAIL"
+    if comparisons:
+        return "PASS"
+    return "PENDING"
+
+
 # ─── GET /report-pairs ────────────────────────────────────────────────────────
 @app.get("/report-pairs")
 async def list_report_pairs(db: Session = Depends(get_db)):
@@ -377,8 +417,8 @@ async def list_report_pairs(db: Session = Depends(get_db)):
             "reportName": p.report_name,
             "overallStatus": p.overall_status,
             "layer1Status": p.visual_result.status if p.visual_result else "skipped",
-            "layer2Status": p.semantic_result.status if p.semantic_result else "PENDING",
-            "layer3Status": p.data_result.status if p.data_result else "PENDING",
+            "layer2Status": _infer_semantic_status(p.semantic_result),
+            "layer3Status": _infer_data_status(p.data_result),
             "differences": differences,
             "visualResult": {
                 "status": p.visual_result.status,

@@ -23,8 +23,10 @@ const api = axios.create({
 // which user triggered each validation run.
 api.interceptors.request.use((config) => {
   if (typeof window !== "undefined") {
-    const token = localStorage.getItem("migrateiq_token");
-    if (token) config.headers["x-token"] = token;
+    const token    = localStorage.getItem("migrateiq_token");
+    const username = localStorage.getItem("migrateiq_user");
+    if (token)    config.headers["x-token"]    = token;
+    if (username) config.headers["x-username"] = username;
   }
   return config;
 });

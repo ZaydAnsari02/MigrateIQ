@@ -9,6 +9,31 @@ import type { UploadedFiles } from "@/types";
 
 // ─── Zone Icons ───────────────────────────────────────────────────────────────
 
+// Tableau logo (simplified colorful crosshair mark)
+function TableauLogo({ size = 28 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none">
+      <rect x="14" y="2" width="4" height="28" rx="1.5" fill="#4E79A7"/>
+      <rect x="2" y="14" width="28" height="4" rx="1.5" fill="#4E79A7"/>
+      <rect x="10" y="6" width="3" height="20" rx="1" fill="#E15759"/>
+      <rect x="6" y="10" width="20" height="3" rx="1" fill="#E15759"/>
+      <rect x="13" y="13" width="6" height="6" rx="1" fill="#59A14F"/>
+    </svg>
+  );
+}
+
+// Power BI logo (stylised bar chart in gold)
+function PowerBILogo({ size = 28 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none">
+      <rect x="2"  y="18" width="6"  height="12" rx="1.5" fill="#F2C811" opacity="0.55"/>
+      <rect x="10" y="10" width="6"  height="20" rx="1.5" fill="#F2C811" opacity="0.75"/>
+      <rect x="18" y="4"  width="6"  height="26" rx="1.5" fill="#F2C811"/>
+      <rect x="26" y="14" width="4"  height="16" rx="1.5" fill="#F2C811" opacity="0.4"/>
+    </svg>
+  );
+}
+
 function ZoneIcon({ type, uploaded }: { type: string; uploaded: boolean }) {
   if (uploaded) {
     return (
@@ -19,14 +44,24 @@ function ZoneIcon({ type, uploaded }: { type: string; uploaded: boolean }) {
       </div>
     );
   }
-  const map: Record<string, string> = {
-    tableau:     "📊",
-    powerbi:     "⚡",
-    screenshots: "🖼",
-  };
+
+  if (type === "tableau" || type === "tableau_screenshots") {
+    return (
+      <div className="w-9 h-9 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center">
+        <TableauLogo size={22} />
+      </div>
+    );
+  }
+  if (type === "powerbi" || type === "powerbi_screenshots") {
+    return (
+      <div className="w-9 h-9 rounded-xl bg-yellow-50 border border-yellow-100 flex items-center justify-center">
+        <PowerBILogo size={22} />
+      </div>
+    );
+  }
   return (
     <div className="w-9 h-9 rounded-xl bg-zinc-100 flex items-center justify-center text-xl">
-      {map[type] ?? "📁"}
+      📁
     </div>
   );
 }
