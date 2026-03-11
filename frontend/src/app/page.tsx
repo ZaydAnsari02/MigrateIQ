@@ -1,0 +1,654 @@
+"use client";
+
+import { useState, useCallback, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { Sidebar } from "@/components/layout/Sidebar";
+import { Header } from "@/components/layout/Header";
+import { DashboardOverview } from "@/components/dashboard/DashboardOverview";
+import { UploadSection } from "@/components/upload/UploadSection";
+import { ResultsTable } from "@/components/results/ResultsTable";
+import { RunsTable } from "@/components/dashboard/RunsTable";
+import { ComparisonExplorer } from "@/components/comparison/ComparisonExplorer";
+import { useSidebar, useUpload, useSelection, useAuth } from "@/hooks";
+import { useExportReport } from "@/hooks/useExportReport";
+import { useNotifications } from "@/context/NotificationsContext";
+import { computeStats } from "@/lib/utils";
+import { validationService } from "@/services/validationService";
+import type { NavItem, ReportPair, ValidationStatus, LayerStatus, Difference, ValidationRun, ExcludedParameters, TableDetail } from "@/types";
+import { DEFAULT_EXCLUDED_PARAMS, excludedToEnabled } from "@/types";
+
+// ─── Map backend result → frontend ReportPair ─────────────────────────────────
+//
+// The backend returns one flat result object per validation run.
+// The frontend ResultsTable expects an array of ReportPair objects — one row
+// per report. Until the backend supports multi-report runs we map the single
+// result to one ReportPair row so every other component keeps working unchanged.
+
+function backendResultToReportPair(result: any): ReportPair {
+  // Ensure results from /report-pairs also get their names cleaned
+  if (result.layer1Status && result.layer2Status && result.reportName) {
+    const cleanRepoName = (name: string) => {
+      if (!name) return "";
+      return name.split(" vs ").map(s => s.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "")).join(" vs ");
+    };
+
+    const l3Details: TableDetail[] = (result.layer3Details ?? []).map((d: any) => ({
+      tableName:            d.tableName,
+      result:               d.result,
+      matchMethod:          d.matchMethod ?? "unknown",
+      rowCountTableau:      d.rowCountTableau ?? undefined,
+      rowCountPowerBi:      d.rowCountPowerBi ?? undefined,
+      rowCountDiffPct:      d.rowCountDiffPct ?? undefined,
+      columnCountTableau:   d.columnCountTableau ?? undefined,
+      columnCountPowerBi:   d.columnCountPowerBi ?? undefined,
+      columnsMatched:       d.columnsMatched ?? [],
+      columnsMissingInPbi:  d.columnsMissingInPbi ?? [],
+      columnsMissingInTwbx: d.columnsMissingInTwbx ?? [],
+      columnTypeMismatches: (d.columnTypeMismatches ?? []).map((m: any) => ({
+        column:        m.column,
+        twbxType:      m.twbx_type ?? m.twbxType,
+        pbiType:       m.pbix_type ?? m.pbiType,
+        twbxCanonical: m.twbx_canonical ?? m.twbxCanonical,
+        pbiCanonical:  m.pbix_canonical ?? m.pbiCanonical,
+      })),
+      failureReasons: d.failureReasons ?? [],
+    }));
+
+    return {
+      ...result,
+      overallStatus: (result.overallStatus ?? "PENDING").toUpperCase(),
+      reportName: cleanRepoName(result.reportName),
+      tableauWorkbook: result.tableauWorkbook?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, ""),
+      powerBiReportName: result.powerBiReportName?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, ""),
+      layer2Details: result.layer2Details ?? null,
+      layer3Details: l3Details,
+    } as ReportPair;
+  }
+
+  const toStatus = (s: string): ValidationStatus => {
+    const upper = (s ?? "").toUpperCase();
+    return (["PASS", "FAIL", "PENDING", "RUNNING", "ERROR", "REVIEW"].includes(upper)
+      ? upper : "PENDING") as ValidationStatus;
+  };
+
+  const toLayer = (s: string): LayerStatus =>
+    (["pass", "fail", "pending", "running", "review", "error", "skipped"].includes((s ?? "").toLowerCase())
+      ? (s ?? "").toLowerCase()
+      : "pending") as LayerStatus;
+
+  // Collect differences from all layers
+  const differences: Difference[] = [];
+
+  // Visual layer (L1)
+  if (result.categories?.visual?.ai_analysis?.key_differences) {
+    result.categories.visual.ai_analysis.key_differences.forEach((diff: string) => {
+      differences.push({
+        type: "Visual Mismatch",
+        detail: diff,
+        severity: result.categories.visual.metrics?.risk_level === "high" ? "high" : "medium",
+        layer: "L1",
+      });
+    });
+  }
+
+  // Data layer (L3) - details is an array
+  if (result.categories?.data?.details) {
+    result.categories.data.details
+      .filter((d: any) => d.result === "FAIL")
+      .forEach((d: any) => {
+        differences.push({
+          type: "Data Regression",
+          detail: d.failure_reasons?.join(", ") || `Table '${d.table_name}' validation failed`,
+          severity: "high",
+          layer: "L3",
+        });
+      });
+  }
+
+  // Semantic model layer (L2) — calc field mismatches
+  if (result.categories?.semantic_model?.details?.failure_reasons?.length > 0) {
+    result.categories.semantic_model.details.failure_reasons.forEach((reason: string) => {
+      differences.push({
+        type: "DAX Mismatch",
+        detail: reason,
+        severity: "high",
+        layer: "L2",
+      });
+    });
+  }
+
+  // Semantic model layer (L2) — column data content mismatches
+  if (result.categories?.semantic_model?.column_value_analysis?.result === "FAIL") {
+    (result.categories.semantic_model.column_value_analysis.details ?? [])
+      .filter((t: any) => t.result === "FAIL")
+      .forEach((t: any) => {
+        differences.push({
+          type: "Data Content Mismatch",
+          detail: `Table '${t.table_name}': ${t.mismatched_columns}/${t.columns_analyzed} column(s) have value-set differences`,
+          severity: "high",
+          layer: "L2",
+        });
+      });
+  }
+
+  // Relationships layer (L1 - Fallback if visual is missing but relationships exist)
+  if (!result.categories?.visual && result.categories?.relationships?.details?.failure_reasons?.length > 0) {
+    result.categories.relationships.details.failure_reasons.forEach((reason: string) => {
+      differences.push({
+        type: "Missing Filter",
+        detail: reason,
+        severity: "high",
+        layer: "L1",
+      });
+    });
+  }
+
+  // Extract clean names from filenames (strip UUID prefix and extension)
+  const cleanName = (filename: string) => {
+    if (!filename) return "Unknown Report";
+    return filename.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, "");
+  };
+
+  const twName = cleanName(result.inputs?.twbx_file || result.tableauScreenshot || "");
+  const pbName = cleanName(result.inputs?.pbix_file || result.powerBiScreenshot || "");
+
+  const finalName = result.reportName
+    ? result.reportName.split(" vs ").map(cleanName).join(" vs ")
+    : `${twName} vs ${pbName}`;
+
+  // Map visual result to internal type
+  const rawVisual = result.categories?.visual || result.visualResult;
+  let visualResult = undefined;
+
+  if (rawVisual) {
+    visualResult = {
+      status: toLayer(rawVisual.result || rawVisual.status),
+      gpt4oCalled: rawVisual.metrics?.gpt4o_called ?? rawVisual.gpt4oCalled ?? (rawVisual.gpt4oRiskLevel !== undefined),
+      gpt4oRiskLevel: rawVisual.metrics?.risk_level ?? rawVisual.gpt4oRiskLevel,
+      aiSummary: rawVisual.ai_analysis?.summary || rawVisual.aiSummary,
+      aiKeyDifferences: rawVisual.ai_analysis?.key_differences
+        ? JSON.stringify(rawVisual.ai_analysis.key_differences)
+        : (Array.isArray(rawVisual.aiKeyDifferences)
+          ? JSON.stringify(rawVisual.aiKeyDifferences)
+          : (typeof rawVisual.aiKeyDifferences === 'string' && rawVisual.aiKeyDifferences.trim().startsWith('[')
+            ? rawVisual.aiKeyDifferences
+            : JSON.stringify(rawVisual.aiKeyDifferences ? [rawVisual.aiKeyDifferences] : []))),
+      // Per-parameter match booleans (passed through from /report-pairs response)
+      chartTypeMatch:    rawVisual.chartTypeMatch,
+      colorSchemeMatch:  rawVisual.colorSchemeMatch,
+      legendMatch:       rawVisual.legendMatch,
+      axisLabelsMatch:   rawVisual.axisLabelsMatch,
+      axisScaleMatch:    rawVisual.axisScaleMatch,
+      titleMatch:        rawVisual.titleMatch,
+      dataLabelsMatch:   rawVisual.dataLabelsMatch,
+      layoutMatch:       rawVisual.layoutMatch,
+      textContentMatch:  rawVisual.textContentMatch,
+      parameterResults:  rawVisual.parameterResults,
+    };
+  }
+
+  // Extract column-level details from the raw data layer details
+  const layer3Details: TableDetail[] = (result.categories?.data?.details ?? []).map((d: any) => ({
+    tableName:            d.table_name,
+    result:               d.result,
+    matchMethod:          d.match_method ?? "unknown",
+    rowCountTableau:      d.row_count_twbx ?? undefined,
+    rowCountPowerBi:      d.row_count_pbix ?? undefined,
+    rowCountDiffPct:      d.row_count_diff_pct ?? undefined,
+    columnCountTableau:   d.column_count_twbx ?? undefined,
+    columnCountPowerBi:   d.column_count_pbix ?? undefined,
+    columnsMatched:       d.columns_matched ?? [],
+    columnsMissingInPbi:  d.columns_missing_in_pbix ?? [],
+    columnsMissingInTwbx: d.columns_missing_in_twbx ?? [],
+    columnTypeMismatches: (d.column_type_mismatches ?? []).map((m: any) => ({
+      column:        m.column,
+      twbxType:      m.twbx_type,
+      pbiType:       m.pbix_type,
+      twbxCanonical: m.twbx_canonical,
+      pbiCanonical:  m.pbix_canonical,
+    })),
+    failureReasons: d.failure_reasons ?? [],
+  }));
+
+  return {
+    id: result.id || result.comparison_id,
+    projectId: "proj-001",
+    runId: result.runId || result.comparison_id || result.id,
+    reportName: finalName,
+    overallStatus: toStatus(result.overall_result || result.overallStatus),
+    overallRisk: result.categories?.visual?.metrics?.risk_level || result.visualResult?.gpt4oRiskLevel,
+    layer1Status: result.categories?.visual !== undefined
+      ? toLayer(result.categories.visual.result || result.layer1Status || "pending")
+      : "skipped",
+    layer2Status: toLayer(result.categories?.semantic_model?.result || result.layer2Status || "pending"),
+    layer3Status: toLayer(result.categories?.data?.result || result.layer3Status || "pending"),
+    differences,
+    layer2Details: (() => {
+      const cv = result.categories?.semantic_model?.column_value_analysis;
+      if (!cv) return null;
+      return {
+        columnValueStatus: cv.result ?? null,
+        columnValueDetails: (cv.details ?? []).map((tbl: any) => ({
+          tableName:         tbl.table_name,
+          pbixTableName:     tbl.pbix_name,
+          result:            tbl.result,
+          columnsAnalyzed:   tbl.columns_analyzed ?? 0,
+          mismatchedColumns: tbl.mismatched_columns ?? 0,
+          failureReasons:    tbl.failure_reasons ?? [],
+          columnAnalyses: (tbl.column_analyses ?? []).map((col: any) => ({
+            columnName:            col.column_name,
+            result:                col.result,
+            overlapPct:            col.overlap_pct ?? 100,
+            mismatchPct:           col.mismatch_pct ?? 0,
+            twbxUniqueCount:       col.twbx_unique_count ?? 0,
+            pbixUniqueCount:       col.pbix_unique_count ?? 0,
+            onlyInTwbx:            col.only_in_twbx ?? [],
+            onlyInPbix:            col.only_in_pbix ?? [],
+            onlyInTwbxCount:       col.only_in_twbx_count ?? 0,
+            onlyInPbixCount:       col.only_in_pbix_count ?? 0,
+            twbxPreviewTruncated:  col.twbx_preview_truncated ?? false,
+            pbixPreviewTruncated:  col.pbix_preview_truncated ?? false,
+            numericStats:          col.numeric_stats,
+          })),
+        })),
+      };
+    })(),
+    layer3Details,
+    visualResult: visualResult as any,
+    tableauScreenshot: result.tableauScreenshot,
+    powerBiScreenshot: result.powerBiScreenshot,
+    tableauWorkbook: twName,
+    powerBiReportName: pbName,
+    createdAt: result.createdAt || result.timestamp,
+    updatedAt: result.updatedAt || result.createdAt || result.timestamp
+  };
+}
+
+function backendRunToValidationRun(run: any): ValidationRun {
+  const toStatus = (s: string): ValidationStatus => {
+    const upper = (s ?? "").toUpperCase();
+    return (["PASS", "FAIL", "PENDING", "RUNNING", "ERROR", "REVIEW"].includes(upper)
+      ? upper : "PENDING") as ValidationStatus;
+  };
+
+  return {
+    id: String(run.id),
+    projectId: String(run.project_id),
+    triggeredBy: run.triggered_by,
+    status: toStatus(run.status),
+    totalReports: run.total_reports,
+    passed: run.passed,
+    failed: run.failed,
+    errored: run.errored,
+    startedAt: run.started_at,
+    completedAt: run.completed_at,
+  };
+}
+
+// ─── Derive run status from its paired results ────────────────────────────────
+//
+// The backend often leaves run.status as PENDING even after completion.
+// Cross-reference with the report pairs that belong to this run to get the
+// real outcome.
+
+function deriveRunStatus(run: ValidationRun, pairs: ReportPair[]): ValidationRun {
+  // Already a terminal / accurate status — keep it
+  if (run.status === "FAIL" || run.status === "PASS" || run.status === "ERROR") return run;
+
+  // String-coerce both sides — JSON may serialize the FK as int or string
+  let runPairs = pairs.filter(p => p.runId != null && String(p.runId) === String(run.id));
+
+  // Fallback for older rows where run_id was not stored: match by date window.
+  // If a run completed and only one pair was created within that window, use it.
+  if (runPairs.length === 0 && run.completedAt) {
+    const start = new Date(run.startedAt).getTime();
+    const end   = new Date(run.completedAt).getTime() + 5_000; // 5 s buffer
+    const orphans = pairs.filter(p => !p.runId);
+    const inWindow = orphans.filter(p => {
+      const t = new Date(p.createdAt).getTime();
+      return t >= start && t <= end;
+    });
+    if (inWindow.length === 1) runPairs = inWindow;
+  }
+
+  if (runPairs.length === 0) return run;
+
+  const hasError = runPairs.some(p => (p.overallStatus ?? "").toUpperCase() === "ERROR");
+  const hasFail  = runPairs.some(p => (p.overallStatus ?? "").toUpperCase() === "FAIL");
+  const allPass  = runPairs.every(p => (p.overallStatus ?? "").toUpperCase() === "PASS");
+
+  const derived: ValidationStatus = hasError ? "ERROR" : hasFail ? "FAIL" : allPass ? "PASS" : run.status;
+  return { ...run, status: derived };
+}
+
+// ─── Page Title Map ───────────────────────────────────────────────────────────
+
+const PAGE_TITLES: Record<NavItem, { title: string; sub: string }> = {
+  dashboard: { title: "Validation Dashboard", sub: "Tableau → PowerBI Validation · Overview" },
+  upload: { title: "Upload Reports", sub: "Upload source files to trigger a new validation run" },
+  runs: { title: "Validation Runs", sub: "History of all pipeline executions" },
+  results: { title: "Validation Results", sub: "Per-report validation outcomes across all three layers" },
+  explorer: { title: "Comparison Explorer", sub: "Side-by-side visual and metric comparison" },
+};
+
+
+// ─── Backend status banner ────────────────────────────────────────────────────
+
+function BackendBanner({ online }: { online: boolean | null }) {
+  if (online === null) return null;
+  if (online) return null; // don't clutter the UI when all is fine
+  return (
+    <div className="mx-6 mt-3 bg-amber-50 border border-amber-200 text-amber-700 rounded-lg px-4 py-2.5 text-xs flex items-center gap-2">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="shrink-0">
+        <circle cx="6" cy="6" r="5.5" stroke="currentColor" strokeWidth="1" />
+        <path d="M6 3.5v3M6 8v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      </svg>
+      <span>
+        Backend not reachable at <code className="font-mono">{process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}</code>.
+        Start FastAPI with <code className="font-mono">uvicorn api:app --reload</code> then refresh.
+      </span>
+    </div>
+  );
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
+export default function DashboardPage() {
+  const router = useRouter();
+  const { isAuthenticated, initialized } = useAuth();
+
+  // Wait until localStorage has been read before deciding to redirect.
+  // Without `initialized`, token starts as null and the effect fires before
+  // the stored value is available — causing a redirect loop / flicker.
+  useEffect(() => {
+    if (initialized && !isAuthenticated) router.replace("/login");
+  }, [initialized, isAuthenticated, router]);
+
+  const [activeNav, setActiveNav] = useState<NavItem>("dashboard");
+  const [startLoading, setStartLoading] = useState(false);
+  const [uploadPct, setUploadPct] = useState(0);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
+  const [explorerSelection, setExplorerSelection] = useState<string | undefined>(undefined);
+  const [excludedParams, setExcludedParams] = useState<ExcludedParameters>({ ...DEFAULT_EXCLUDED_PARAMS });
+
+  // All real results that have come back from the backend this session
+  const [livePairs, setLivePairs] = useState<ReportPair[]>([]);
+  const [liveRuns, setLiveRuns] = useState<ValidationRun[]>([]);
+
+  const sidebar = useSidebar(false);
+  const upload = useUpload();
+  const selection = useSelection<string>();
+  const { addNotification } = useNotifications();
+  const exportReport = useExportReport();
+
+  const stats = computeStats(livePairs);
+  const page = PAGE_TITLES[activeNav];
+
+  // ── Load all data on mount ──────────────────────────────────────────────
+
+  const fetchPairs = useCallback(async () => {
+    const [runsData, pairsData] = await Promise.all([
+      validationService.listRuns(),
+      validationService.listReportPairs(),
+    ]);
+    setLiveRuns(runsData.map(backendRunToValidationRun));
+    setLivePairs(pairsData.map(backendResultToReportPair));
+    return pairsData.length;
+  }, []);
+
+  useEffect(() => {
+    const init = async () => {
+      try {
+        const isOnline = await validationService.healthCheck();
+        setBackendOnline(isOnline);
+        if (!isOnline) {
+          addNotification("error", "Backend offline", "Start the FastAPI server and refresh to connect.");
+          return;
+        }
+
+        const count = await fetchPairs();
+        if (count > 0) {
+          addNotification("info", "Results loaded", `${count} validation result${count !== 1 ? "s" : ""} loaded from server.`);
+        }
+      } catch (err) {
+        console.error("Failed to load initial data:", err);
+        addNotification("error", "Failed to load data", "Could not fetch runs or results from the server.");
+      }
+    };
+    init();
+  }, [addNotification, fetchPairs]);
+
+  // ── Start Validation ─────────────────────────────────────────────────────
+  //
+  // 1. POST /validate with the uploaded files
+  // 2. Map the returned JSON to a ReportPair
+  // 3. Append to livePairs and navigate to Results
+
+  const handleStartValidation = useCallback(async () => {
+    setApiError(null);
+    setStartLoading(true);
+    setUploadPct(0);
+    addNotification("info", "Validation started", "Uploading files and running the three-layer validation engine…");
+
+    try {
+      const result = await validationService.startValidation(
+        upload.files,
+        setUploadPct,
+        excludedToEnabled(excludedParams),
+      );
+      const pair = backendResultToReportPair(result);
+      setLivePairs(prev => [pair, ...prev]);
+
+      // Refresh lists
+      await fetchPairs();
+
+      if (pair.overallStatus === "PASS") {
+        addNotification("success", "Validation passed", `"${pair.reportName}" passed all three layers.`);
+      } else if (pair.overallStatus === "FAIL") {
+        addNotification("warning", "Validation completed with failures", `"${pair.reportName}" has ${pair.differences.length} difference${pair.differences.length !== 1 ? "s" : ""} detected.`);
+      } else {
+        addNotification("info", "Validation complete", `"${pair.reportName}" finished with status: ${pair.overallStatus}.`);
+      }
+
+      upload.reset();
+      setActiveNav("results");
+      selection.select(pair.id);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setApiError(msg);
+      addNotification("error", "Validation failed", msg);
+    } finally {
+      setStartLoading(false);
+      setUploadPct(0);
+    }
+  }, [upload, selection, addNotification, fetchPairs]);
+
+  // ── Load a past result by run ID (called from RunsTable "View" action) ───
+
+  const handleLoadRun = useCallback(async (runId: string) => {
+    try {
+      const result = await validationService.getResult(runId);
+      const pair = backendResultToReportPair(result);
+      setLivePairs(prev => {
+        const exists = prev.some(p => p.id === pair.id);
+        return exists ? prev : [pair, ...prev];
+      });
+      addNotification("info", "Run loaded", `Results for "${pair.reportName}" loaded from history.`);
+      setActiveNav("results");
+      selection.select(pair.id);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setApiError(msg);
+      addNotification("error", "Failed to load run", msg);
+    }
+  }, [selection, addNotification]);
+
+  // ── Navigate to Explorer with specific reports ───────────────────────────
+
+  const handleMoreInfo = useCallback((pair: ReportPair) => {
+    // We set this as the 'left' side of comparison, and potentially the same or first pair as 'right'
+    setExplorerSelection(pair.id);
+    setActiveNav("explorer");
+  }, []);
+
+  return (
+    <div className="flex h-screen overflow-hidden bg-[#F4F5F7]">
+      <Sidebar
+        activeNav={activeNav}
+        onNav={setActiveNav}
+        collapsed={sidebar.collapsed}
+        onToggle={sidebar.toggle}
+      />
+
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <Header />
+        <BackendBanner online={backendOnline} />
+
+        <main className="flex-1 overflow-y-auto">
+          <div className="max-w-screen-xl mx-auto px-6 py-6">
+
+            {/* Page heading */}
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-xl font-bold text-zinc-900 tracking-tight">{page.title}</h2>
+                <p className="text-xs text-zinc-400 mt-0.5">{page.sub}</p>
+              </div>
+
+              {activeNav === "dashboard" && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setActiveNav("upload")}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-1.5 shadow-sm shadow-blue-200"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                      <path d="M6 2v8M2 6h8" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
+                    </svg>
+                    New Validation Run
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* API error banner */}
+            {apiError && (
+              <div className="mb-4 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-xs flex items-start gap-2">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="mt-0.5 shrink-0">
+                  <circle cx="6" cy="6" r="5.5" stroke="currentColor" strokeWidth="1" />
+                  <path d="M6 3.5v3M6 8v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                </svg>
+                <div>
+                  <span className="font-semibold">Error: </span>{apiError}
+                  <button onClick={() => setApiError(null)} className="ml-3 underline opacity-70 hover:opacity-100">Dismiss</button>
+                </div>
+              </div>
+            )}
+
+            {/* ── Dashboard ──────────────────────────────────────────────── */}
+            {activeNav === "dashboard" && (
+              <DashboardOverview stats={stats} runs={liveRuns} pairs={livePairs} />
+            )}
+
+            {/* ── Upload ─────────────────────────────────────────────────── */}
+            {activeNav === "upload" && (
+              <>
+                <UploadSection
+                  files={upload.files}
+                  uploadCount={upload.uploadCount}
+                  isReady={upload.isReady}
+                  onFile={upload.setFile}
+                  onRemove={upload.removeFile}
+                  onStart={handleStartValidation}
+                  loading={startLoading}
+                  excludedParams={excludedParams}
+                  onExcludedParamsChange={setExcludedParams}
+                />
+                {/* Upload progress bar */}
+                {startLoading && uploadPct > 0 && uploadPct < 100 && (
+                  <div className="mt-4 bg-white border border-zinc-200 rounded-xl p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs text-zinc-600 font-medium">Uploading files…</span>
+                      <span className="text-xs font-mono text-blue-600">{uploadPct}%</span>
+                    </div>
+                    <div className="w-full bg-zinc-100 rounded-full h-1.5 overflow-hidden">
+                      <div
+                        className="bg-blue-600 h-full rounded-full transition-all duration-300"
+                        style={{ width: `${uploadPct}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+                {startLoading && uploadPct === 100 && (
+                  <div className="mt-4 bg-white border border-zinc-200 rounded-xl p-4 flex items-center gap-3">
+                    <svg className="animate-spin w-4 h-4 text-blue-600 shrink-0" viewBox="0 0 24 24" fill="none">
+                      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity=".25" />
+                      <path d="M12 2a10 10 0 0110 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+                    </svg>
+                    <span className="text-xs text-zinc-600">
+                      Files uploaded — running validation engine (this may take 5–30 seconds)…
+                    </span>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* ── Runs ───────────────────────────────────────────────────── */}
+            {activeNav === "runs" && (
+              <RunsTable
+                runs={liveRuns.map(r => deriveRunStatus(r, livePairs))}
+                onSelect={run => handleLoadRun(run.id)}
+              />
+            )}
+
+            {/* ── Results ────────────────────────────────────────────────── */}
+            {activeNav === "results" && (
+              livePairs.length === 0 ? (
+                <div className="bg-white rounded-xl border border-zinc-200 shadow-card p-12 text-center">
+                  <div className="text-4xl mb-3">📭</div>
+                  <h3 className="text-sm font-semibold text-zinc-700 mb-1">No results yet</h3>
+                  <p className="text-xs text-zinc-400 mb-4">Upload a Tableau and Power BI file to run your first validation.</p>
+                  <button
+                    onClick={() => setActiveNav("upload")}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+                  >
+                    Go to Upload
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-5">
+                  <div className="col-span-1">
+                    <ResultsTable
+                      pairs={livePairs}
+                      selectedId={selection.selected}
+                      onSelect={selection.toggle}
+                      onMoreInfo={handleMoreInfo}
+                      onExport={async (pairs) => {
+                        await exportReport(pairs);
+                        addNotification("success", "Report exported", `PDF generated for ${pairs.length} run${pairs.length !== 1 ? "s" : ""}.`);
+                      }}
+                    />
+                  </div>
+                </div>
+              )
+            )}
+
+            {/* ── Explorer ───────────────────────────────────────────────── */}
+            {activeNav === "explorer" && (
+              <ComparisonExplorer
+                pairs={livePairs}
+                initialLeftId={explorerSelection}
+                onRefresh={() => fetchPairs().then(() => {})}
+              />
+            )}
+
+            {/* Footer */}
+            <div className="flex items-center justify-between text-[10px] text-zinc-400 py-4 mt-2">
+              <span>MigrateIQ v1.0.0 · Three-layer automated validation engine</span>
+              <span className="font-mono">L1 Visual · L2 Semantic · L3 Data Regression</span>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}

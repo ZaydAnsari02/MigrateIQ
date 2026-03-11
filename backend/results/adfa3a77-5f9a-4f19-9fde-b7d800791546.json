@@ -1,0 +1,45 @@
+{
+  "comparison_id": "d456b780-b469-4920-beb0-fbfba72de304",
+  "timestamp": "2026-03-09T05:59:29.106092Z",
+  "inputs": {
+    "twbx_file": "adfa3a77-5f9a-4f19-9fde-b7d800791546_Basic Report_Sept13_V2.twbx",
+    "pbix_file": "adfa3a77-5f9a-4f19-9fde-b7d800791546_Stacked Bars2.pbix"
+  },
+  "overall_result": "PASS",
+  "categories": {
+    "data": {
+      "result": "PASS",
+      "tolerance_threshold_pct": 0.5,
+      "tables_compared": 0,
+      "details": []
+    },
+    "semantic_model": {
+      "result": "PASS",
+      "measures_compared": 0,
+      "details": {
+        "measures_matched": [],
+        "measures_missing_in_pbix": [],
+        "measures_missing_in_twbx": [],
+        "expression_mismatches": [],
+        "data_type_mismatches": [],
+        "failure_reasons": []
+      }
+    },
+    "relationships": {
+      "result": "PASS",
+      "relationships_compared": 0,
+      "details": {
+        "relationships_matched": [],
+        "relationships_missing_in_pbix": [],
+        "relationships_missing_in_twbx": [],
+        "cardinality_mismatches": [],
+        "failure_reasons": []
+      }
+    }
+  },
+  "summary": {
+    "total_failures": 0,
+    "failure_categories": [],
+    "notes": "All checks passed"
+  }
+}
