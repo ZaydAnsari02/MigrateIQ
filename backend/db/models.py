@@ -112,6 +112,9 @@ class ReportPair(Base):
     powerbi_page_name: Mapped[Optional[str]]     = mapped_column(String, nullable=True)
     powerbi_screenshot: Mapped[Optional[str]]    = mapped_column(String, nullable=True)
 
+    # L3 Measure Equivalence (from l3_pipeline)
+    l3_result_json: Mapped[Optional[str]]        = mapped_column(Text, nullable=True)
+
     # Aggregate result
     overall_status: Mapped[str]                  = mapped_column(String, nullable=False)
     created_at: Mapped[datetime]                 = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
@@ -395,12 +398,13 @@ def _migrate_columns(engine) -> None:
 # ---------------------------------------------------------------------------
 
 def save_comparison_result(
-    session, 
-    result_json: dict, 
-    project_id: int, 
+    session,
+    result_json: dict,
+    project_id: int,
     run_id: Optional[int] = None,
     tableau_screenshot: Optional[str] = None,
-    powerbi_screenshot: Optional[str] = None
+    powerbi_screenshot: Optional[str] = None,
+    l3_result: Optional[dict] = None,
 ) -> ReportPair:
     """
     Persist the full 3-layer JSON result into the normalised schema.
@@ -420,6 +424,7 @@ def save_comparison_result(
     pbName = clean(inputs.get("pbix_file"))
 
     # 1. Report Pair
+    import json as _json2
     pair = ReportPair(
         project_id     = project_id,
         run_id         = run_id,
@@ -429,6 +434,7 @@ def save_comparison_result(
         tableau_screenshot = tableau_screenshot,
         powerbi_screenshot = powerbi_screenshot,
         overall_status = result_json.get("overall_result", "PENDING"),
+        l3_result_json = _json2.dumps(l3_result) if l3_result else None,
     )
     session.add(pair)
     session.flush()

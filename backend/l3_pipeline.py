@@ -125,18 +125,47 @@ def run_l3_validation(twbx_path: str, pbit_path: str) -> Dict[str, Any]:
         else "FAIL"
     )
 
+    # ── 5a. Top-level description ──────────────────────────────────────────
+    total   = len(judged)
+    passed  = sum(1 for r in judged if r["verdict"] == "PASS")
+    failed  = sum(1 for r in judged if r["verdict"] == "FAIL")
+    unknown = sum(1 for r in judged if r["verdict"] == "UNKNOWN")
+
+    if not judged:
+        description = "No measures found to compare."
+    elif overall_status == "PASS":
+        description = (
+            f"All {total} measure(s) are semantically equivalent "
+            "between Tableau and Power BI."
+        )
+    else:
+        parts: List[str] = []
+        if failed:
+            parts.append(f"{failed} measure(s) failed equivalence check")
+        if unknown:
+            parts.append(f"{unknown} measure(s) could not be determined")
+        if missing_pbit:
+            parts.append(f"{len(missing_pbit)} measure(s) missing in Power BI")
+        if missing_twbx:
+            parts.append(f"{len(missing_twbx)} measure(s) missing in Tableau")
+        description = (
+            f"Measure equivalence check failed: {', '.join(parts)} "
+            f"(out of {total} total measure(s))."
+        )
+
     # ── 6. Cleanup ────────────────────────────────────────────────────────
     twbx.cleanup()
     pbit.cleanup()
 
     return {
-        "layer":  "L3",
-        "status": overall_status,
+        "layer":       "L3",
+        "status":      overall_status,
+        "description": description,
         "summary": {
-            "total_measures":  len(judged),
-            "passed":          sum(1 for r in judged if r["verdict"] == "PASS"),
-            "failed":          sum(1 for r in judged if r["verdict"] == "FAIL"),
-            "unknown":         sum(1 for r in judged if r["verdict"] == "UNKNOWN"),
+            "total_measures":  total,
+            "passed":          passed,
+            "failed":          failed,
+            "unknown":         unknown,
             "missing_in_pbit": missing_pbit,
             "missing_in_twbx": missing_twbx,
         },

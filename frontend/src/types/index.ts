@@ -3,7 +3,7 @@
 export type ValidationStatus = "PASS" | "FAIL" | "PENDING" | "RUNNING" | "ERROR" | "REVIEW";
 export type LayerStatus = "pass" | "fail" | "pending" | "running" | "review" | "skipped";
 export type DiffSeverity = "high" | "medium" | "low";
-export type DiffType = "Metric Mismatch" | "Missing Filter" | "Visual Mismatch" | "DAX Mismatch" | "Data Regression" | "Data Content Mismatch";
+export type DiffType = "Metric Mismatch" | "Missing Filter" | "Visual Mismatch" | "DAX Mismatch" | "Data Regression" | "Data Content Mismatch" | "Measure Mismatch";
 
 // ─── Core Entities ────────────────────────────────────────────────────────────
 
@@ -129,9 +129,11 @@ export interface ReportPair {
   visualResult?: VisualResult;
   layer2Details?: Layer2Details | null;
   layer3Details?: TableDetail[];
+  layer3Description?: string;
   l3Result?: {
     layer: string;
     status: string;
+    description?: string;
     error?: string;
     summary: {
       total_measures: number;

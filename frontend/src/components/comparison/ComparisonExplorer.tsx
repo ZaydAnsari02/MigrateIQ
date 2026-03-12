@@ -194,6 +194,7 @@ function OverlapBar({ pct }: { pct: number }) {
 interface L3Result {
   layer: string;
   status: string;
+  description?: string;
   summary: {
     total_measures: number;
     passed: number;
@@ -240,6 +241,9 @@ function L3MeasureResults({ l3 }: { l3: L3Result }) {
             <p className="text-[10px] text-zinc-400 mt-0.5">
               LLM-judged formula equivalence between Tableau calculated fields and DAX measures
             </p>
+            {l3.description && (
+              <p className="text-[11px] text-zinc-600 mt-1">{l3.description}</p>
+            )}
           </div>
           <span className={cn(
             "text-[10px] font-bold px-3 py-1 rounded-full border uppercase",
@@ -351,7 +355,7 @@ function L3MeasureResults({ l3 }: { l3: L3Result }) {
   );
 }
 
-// ─── Unified Column Analysis Component (L2) ───────────────────────────────────
+// ─── Unified Column Analysis Component (L2/L3) ────────────────────────────────
 
 function UnifiedColumnAnalysis({
   layer2Details,
@@ -794,15 +798,15 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
 
   const storedL2Status: LayerStatus = ((pair?.layer2Status ?? "skipped") as string).toLowerCase() as LayerStatus;
 
-  // Derive L3 status from l3Result if available, otherwise default to pass
-  const storedL3Status: LayerStatus = (() => {
-    if (pair?.l3Result) {
-      return (pair.l3Result.status ?? "skipped").toLowerCase() as LayerStatus;
-    }
-    return "pass";
-  })();
+  // L3 status comes from pair.layer3Status, which the backend and backendResultToReportPair
+  // both derive from the measure-equivalence result (l3Result.status) when a PBIT was uploaded,
+  // or from the data-layer table comparisons otherwise.  Never recompute it here.
+  const storedL3Status: LayerStatus = ((pair?.layer3Status ?? "skipped") as string).toLowerCase() as LayerStatus;
 
   const effectiveOverallStatus: ValidationStatus = (() => {
+    // Trust the backend's overall status as the authoritative source (it accounts for
+    // data-layer failures even when L3 is "skipped" due to no PBIT being uploaded).
+    if ((pair?.overallStatus ?? "").toUpperCase() === "FAIL") return "FAIL";
     const statuses = [effectiveL1Status, storedL2Status, storedL3Status];
     if (statuses.some(s => (s ?? "").toUpperCase() === "FAIL")) return "FAIL";
     return "PASS";
@@ -1228,7 +1232,7 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
               </div>
             )}
 
-            {/* ── Column Analysis (L2) ──────────────────────────────────── */}
+            {/* ── Column Analysis (L2/L3) ──────────────────────────────── */}
             {cards.columnDataContent && (
               <UnifiedColumnAnalysis
                 layer2Details={pair.layer2Details}
@@ -1270,7 +1274,7 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
                   ) : (
                     <div className="space-y-2">
                       {pair.differences.map((d: Difference, i: number) => {
-                        const displayLayer = (d.layer === "L3" || (d.type as string) === "Data Regression") ? "L2" : d.layer;
+                        const displayLayer = (d.type as string) === "Data Regression" ? "L2" : d.layer;
                         const lc = LAYER_META[displayLayer as keyof typeof LAYER_META] ?? LAYER_META.L2;
                         const label = getDiffLabel(d.type, d.detail);
                         return (

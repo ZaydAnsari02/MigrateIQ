@@ -221,7 +221,13 @@ function backendResultToReportPair(result: any): ReportPair {
       ? toLayer(result.categories.visual.result || result.layer1Status || "pending")
       : "skipped",
     layer2Status: toLayer(result.categories?.semantic_model?.result || result.layer2Status || "pending"),
-    layer3Status: toLayer(result.categories?.data?.result || result.layer3Status || "pending"),
+    layer3Status: (() => {
+      // Prefer measure-equivalence status (l3_result) over table-comparison status (categories.data).
+      // l3_result is only present when a PBIT file was uploaded; fall back to data layer otherwise.
+      const l3r = result.l3_result ?? result.l3Result;
+      if (l3r?.status) return toLayer(l3r.status);
+      return toLayer(result.categories?.data?.result || result.layer3Status || "skipped");
+    })(),
     differences,
     layer2Details: (() => {
       const cv = result.categories?.semantic_model?.column_value_analysis;
@@ -254,6 +260,8 @@ function backendResultToReportPair(result: any): ReportPair {
       };
     })(),
     layer3Details,
+    layer3Description: result.layer3Description ?? result.layer3_description ?? undefined,
+    l3Result: result.l3_result ?? result.l3Result ?? undefined,
     visualResult: visualResult as any,
     tableauScreenshot: result.tableauScreenshot,
     powerBiScreenshot: result.powerBiScreenshot,

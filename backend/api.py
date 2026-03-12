@@ -6,7 +6,6 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Optional
-from l3_pipeline import run_l3_validation
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,7 +17,8 @@ BACKEND_DIR = Path(__file__).parent.resolve()
 sys.path.append(str(BACKEND_DIR))
 
 from auth import USERS
-import config
+import config  # loads .env via python-dotenv — must come before l3_pipeline
+from l3_pipeline import run_l3_validation
 from db.models import init_db, save_comparison_result, MigrationProject, ReportPair, ValidationRun, Status, VisualResult
 from visual.pipeline import run_visual_validation
 
@@ -254,11 +254,12 @@ async def validate_reports(
             
             # Save the report pair details
             pair = save_comparison_result(
-                db, result, 
-                project_id         = project.id, 
+                db, result,
+                project_id         = project.id,
                 run_id             = v_run.id,
                 tableau_screenshot = tab_screenshot_path,
-                powerbi_screenshot = pbi_screenshot_path
+                powerbi_screenshot = pbi_screenshot_path,
+                l3_result          = l3_result,
             )
             db.commit()
             
@@ -652,16 +653,82 @@ async def list_report_pairs(
         # vis_dict["status"] is already computed by _build_visual_result_dict using params_used.
         effective_l1 = vis_dict["status"] if vis_dict else "skipped"
         l2_status    = _infer_semantic_status(p.semantic_result)
-        l3_status    = _infer_data_status(p.data_result)
+
+        # ── L3: read measure equivalence result before computing l3_status ────────────────
+        # l3_result_data must be resolved first so that l3_status is driven by the PBIT
+        # measure-equivalence output, not the table-level DataResult comparisons.
+        l3_result_data = json.loads(p.l3_result_json) if p.l3_result_json else None
+        if l3_result_data and "description" not in l3_result_data:
+            _s   = l3_result_data.get("summary", {})
+            _tot = _s.get("total_measures", 0)
+            _f   = _s.get("failed", 0)
+            _u   = _s.get("unknown", 0)
+            _mp  = _s.get("missing_in_pbit", [])
+            _mt  = _s.get("missing_in_twbx", [])
+            if not l3_result_data.get("measure_results") and _tot == 0:
+                l3_result_data["description"] = "No measures found to compare."
+            elif l3_result_data.get("status") == "PASS":
+                l3_result_data["description"] = (
+                    f"All {_tot} measure(s) are semantically equivalent between Tableau and Power BI."
+                )
+            else:
+                _parts = []
+                if _f:  _parts.append(f"{_f} measure(s) failed equivalence check")
+                if _u:  _parts.append(f"{_u} measure(s) could not be determined")
+                if _mp: _parts.append(f"{len(_mp)} measure(s) missing in Power BI")
+                if _mt: _parts.append(f"{len(_mt)} measure(s) missing in Tableau")
+                l3_result_data["description"] = (
+                    f"Measure equivalence check failed: {', '.join(_parts)} (out of {_tot} total measure(s))."
+                    if _parts else "Measure equivalence check failed."
+                )
+
+        # L3 = measure equivalence (PBIT) only.  When no PBIT was uploaded, L3 is skipped.
+        # Table-schema comparison lives in l2/data and is captured separately below.
+        if l3_result_data and l3_result_data.get("status"):
+            l3_status = l3_result_data["status"].upper()
+        else:
+            l3_status = "skipped"
+
+        # Data-layer status (table schema comparison) — separate from L3 measure equivalence.
+        # Contributes to overall even when L3 is skipped (no PBIT uploaded).
+        data_status = _infer_data_status(p.data_result)
 
         # Recompute overall status from effective layer results — never use the stale stored value,
         # because parameter exclusions may have changed L1 from FAIL → PASS after the original run.
         # Rule: FAIL if any layer = FAIL, otherwise PASS.
         effective_overall = (
             "FAIL"
-            if any((s or "").upper() == "FAIL" for s in [effective_l1, l2_status, l3_status])
+            if any((s or "").upper() == "FAIL" for s in [effective_l1, l2_status, l3_status, data_status])
             else "PASS"
         )
+
+        # ── Append L3 measure failures to the regression log differences ──────────
+        if l3_result_data:
+            for m in l3_result_data.get("measure_results", []):
+                if m.get("verdict") == "FAIL":
+                    differences.append({
+                        "type": "Measure Mismatch",
+                        "detail": m.get("reason") or f"Measure '{m.get('measure', 'unknown')}' failed equivalence check.",
+                        "severity": "high",
+                        "layer": "L3",
+                    })
+            for name in l3_result_data.get("summary", {}).get("missing_in_pbit", []):
+                differences.append({
+                    "type": "Measure Mismatch",
+                    "detail": f"Measure '{name}' exists in Tableau but is missing in Power BI.",
+                    "severity": "high",
+                    "layer": "L3",
+                })
+            for name in l3_result_data.get("summary", {}).get("missing_in_twbx", []):
+                differences.append({
+                    "type": "Measure Mismatch",
+                    "detail": f"Measure '{name}' exists in Power BI but is missing in Tableau.",
+                    "severity": "high",
+                    "layer": "L3",
+                })
+
+        # ── L3 description from measure equivalence result ───────────────────────
+        layer3_description = l3_result_data.get("description") if l3_result_data else None
 
         output.append({
             "id": str(p.id),
@@ -734,6 +801,8 @@ async def list_report_pairs(
                 }
                 for t in (p.data_result.table_comparisons if p.data_result else [])
             ] if p.data_result else [],
+            "l3Result": l3_result_data,
+            "layer3Description": layer3_description,
         })
     return output
 
