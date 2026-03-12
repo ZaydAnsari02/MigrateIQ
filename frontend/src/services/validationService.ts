@@ -206,6 +206,7 @@ export const validationService = {
     const form = new FormData();
     form.append("twbx", files.twb);
     form.append("pbix", files.pbix);
+    if (files.pbit) form.append("pbit", files.pbit);
 
     // Attach screenshots if provided.
     // The backend handles both single images and .zip files.
