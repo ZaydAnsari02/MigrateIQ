@@ -204,7 +204,7 @@ export function UploadSection({
           </p>
         </div>
         <span className="text-xs text-zinc-400 font-mono bg-zinc-50 border border-zinc-200 px-2 py-1 rounded">
-          {uploadCount} / {requiredZones.length} required uploaded
+          {uploadCount} / 2 required uploads
         </span>
       </CardHeader>
 
