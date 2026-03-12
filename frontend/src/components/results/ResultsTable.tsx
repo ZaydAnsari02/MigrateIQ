@@ -126,7 +126,7 @@ function ResultRow({ pair, selected, checked, onChecked, onClick, onMoreInfo }: 
       <td className="px-3 py-3.5">
         <div className="flex items-center gap-1.5">
           <LayerDot status={(pair.layer1Status as string).toLowerCase() as LayerStatus} label="L1" />
-          <LayerDot status={(pair.layer2Status as string).toLowerCase() as LayerStatus} label="L2" />
+          <LayerDot status={((pair.effectiveL2Status ?? pair.layer2Status) as string).toLowerCase() as LayerStatus} label="L2" />
           <LayerDot status={(pair.layer3Status as string).toLowerCase() as LayerStatus} label="L3" />
         </div>
       </td>

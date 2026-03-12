@@ -171,6 +171,24 @@ class TwbxParser:
                         "ordinal": col.get("ordinal", ""),
                     })
 
+            # Fallback: if no columns in the relation, try datasource-level <column>
+            # elements (non-calculated). This handles Tableau workbooks that store
+            # column definitions at the datasource level rather than inside <relation>.
+            if not columns:
+                _skip = {"number of records", "measure names", "measure values"}
+                for col in ds_elem.findall("column"):  # direct children only
+                    if col.find("calculation") is not None:
+                        continue  # skip calculated fields
+                    col_name = (col.get("caption", "") or col.get("name", "").strip("[]")).strip()
+                    if not col_name or col_name.lower() in _skip:
+                        continue
+                    columns.append({
+                        "name": col_name,
+                        "data_type": col.get("datatype", col.get("type", "string")),
+                        "caption": col_name,
+                        "ordinal": col.get("ordinal", ""),
+                    })
+
             # Keep the entry with the most columns (most complete definition)
             if rel_name not in tables or len(columns) > len(tables[rel_name]["columns"]):
                 tables[rel_name] = {

@@ -54,14 +54,23 @@ function backendResultToReportPair(result: any): ReportPair {
       failureReasons: d.failureReasons ?? [],
     }));
 
+    const earlyL2Details = result.layer2Details ?? null;
+    const earlySchemaFails = l3Details.filter((s: any) => s.result === "FAIL").length;
+    const earlyMismatchedCols = (earlyL2Details?.columnValueDetails ?? []).reduce((acc: number, v: any) => acc + (v.mismatchedColumns ?? 0), 0);
+    const earlyEffectiveL2Status: LayerStatus = (earlySchemaFails > 0 || earlyMismatchedCols > 0)
+      ? "fail"
+      : ((result.layer2Status ?? "skipped") as string).toLowerCase() as LayerStatus;
+
     return {
       ...result,
       overallStatus: (result.overallStatus ?? "PENDING").toUpperCase(),
       reportName: cleanRepoName(result.reportName),
       tableauWorkbook: result.tableauWorkbook?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, ""),
       powerBiReportName: result.powerBiReportName?.replace(/^[0-9a-fA-F-]{36}_/, "").replace(/\.[^/.]+$/, ""),
-      layer2Details: result.layer2Details ?? null,
+      layer2Details: earlyL2Details,
       layer3Details: l3Details,
+      effectiveL2Status: earlyEffectiveL2Status,
+      storedL3Status: ((result.layer3Status ?? "skipped") as string).toLowerCase() as LayerStatus,
     } as ReportPair;
   }
 
@@ -89,6 +98,20 @@ function backendResultToReportPair(result: any): ReportPair {
         layer: "L1",
       });
     });
+  }
+
+  // Data layer — schema failures (unmatched tables) are L2 semantic issues
+  if (result.categories?.data?.details) {
+    result.categories.data.details
+      .filter((d: any) => d.result === "FAIL" && d.match_method === "unmatched")
+      .forEach((d: any) => {
+        differences.push({
+          type: "Schema Mismatch",
+          detail: `Schema mismatch detected in table '${d.table_name}'`,
+          severity: "medium",
+          layer: "L2",
+        });
+      });
   }
 
   // Data layer (L3) - details is an array
@@ -268,7 +291,19 @@ function backendResultToReportPair(result: any): ReportPair {
     tableauWorkbook: twName,
     powerBiReportName: pbName,
     createdAt: result.createdAt || result.timestamp,
-    updatedAt: result.updatedAt || result.createdAt || result.timestamp
+    updatedAt: result.updatedAt || result.createdAt || result.timestamp,
+    effectiveL2Status: (() => {
+      const schemaFails = layer3Details.filter((s: any) => s.result === "FAIL").length;
+      const mismatchedCols = (result.categories?.semantic_model?.column_value_analysis?.details ?? [])
+        .reduce((acc: number, v: any) => acc + (v.mismatched_columns ?? 0), 0);
+      if (schemaFails > 0 || mismatchedCols > 0) return "fail" as LayerStatus;
+      return toLayer(result.categories?.semantic_model?.result || result.layer2Status || "skipped");
+    })(),
+    storedL3Status: (() => {
+      const l3r = result.l3_result ?? result.l3Result;
+      if (l3r?.status) return toLayer(l3r.status);
+      return toLayer(result.categories?.data?.result || result.layer3Status || "skipped");
+    })(),
   };
 }
 

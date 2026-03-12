@@ -206,13 +206,14 @@ async def validate_reports(
                 l3_result = run_l3_validation(twbx_path, pbit_path)
                 result["l3_result"] = l3_result
             except Exception as e:
-                result["l3_result"] = {
+                l3_result = {
                     "layer": "L3",
                     "status": "ERROR",
                     "error": str(e),
                     "summary": {},
                     "measure_results": []
                 }
+                result["l3_result"] = l3_result
 
         # ─── Screenshot Handling ────────────────────────────────────────────────
         tab_screenshot_path = None
@@ -668,21 +669,36 @@ async def list_report_pairs(
             except Exception:
                 pass
 
-        # Layer 3: Data
+        # Data-layer table comparisons — all failures are L2 issues.
+        # L3 (measure equivalence) is a separate layer driven by PBIT data only.
         if p.data_result:
             for t in p.data_result.table_comparisons:
                 if t.result != "PASS":
-                    differences.append({
-                        "type": "Data Regression",
-                        "detail": t.failure_reasons or f"Table '{t.table_name}' validation failed",
-                        "severity": "high",
-                        "layer": "L3"
-                    })
+                    if t.match_method == "unmatched":
+                        # Unmatched tables are schema mismatches → L2 Semantic Validation
+                        differences.append({
+                            "type": "Schema Mismatch",
+                            "detail": f"Schema mismatch detected in table '{t.table_name or 'Unknown'}'",
+                            "severity": "medium",
+                            "layer": "L2",
+                        })
+                    else:
+                        # Matched but failing tables (column/type/count mismatches) → L2
+                        differences.append({
+                            "type": "Schema Mismatch",
+                            "detail": t.failure_reasons or f"Schema issues in table '{t.table_name}'",
+                            "severity": "high",
+                            "layer": "L2",
+                        })
 
         # Derive effective L1 status from parameterResults so excluded params don't cause FAIL.
         # vis_dict["status"] is already computed by _build_visual_result_dict using params_used.
         effective_l1 = vis_dict["status"] if vis_dict else "skipped"
         l2_status    = _infer_semantic_status(p.semantic_result)
+        # Schema failures (failed table comparisons) are also L2 failures
+        if l2_status != "FAIL" and p.data_result:
+            if any(t.result not in ("PASS", "pass") for t in p.data_result.table_comparisons):
+                l2_status = "FAIL"
 
         # ── L3: read measure equivalence result before computing l3_status ────────────────
         # l3_result_data must be resolved first so that l3_status is driven by the PBIT

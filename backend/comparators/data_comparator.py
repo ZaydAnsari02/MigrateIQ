@@ -634,25 +634,34 @@ class DataComparator:
                 continue
 
             # Skip value analysis for schema-only tables (PBIX DataModel is
-            # compressed or data is in the remote Power BI Service — actual
-            # rows are unavailable, so value-overlap would always be 0 %).
+            # compressed, data is in the remote Power BI Service, or the schema
+            # was sourced from a PBIT template — actual row values are
+            # unavailable, so value-overlap would always be 0 %).
             if pbix_name in (schema_only_tables or set()):
+                pbix_df_meta = pbix_tables.get(pbix_name)
+                pbix_meta_rows = len(pbix_df_meta) if pbix_df_meta is not None else 0
+                logger.info(
+                    f"[{twbx_name}] Skipping value comparison (schema-only). "
+                    f"TWBX rows: {len(twbx_tables[twbx_name])}, "
+                    f"PBIX rows from metadata: {pbix_meta_rows}"
+                )
                 results.append({
                     "table_name": twbx_name,
                     "twbx_name": twbx_name,
                     "pbix_name": pbix_name,
                     "result": "SKIPPED",
                     "reason": (
-                        "Power BI data not available locally "
-                        "(remote dataset or compressed DataModel). "
-                        "Schema comparison was performed instead."
+                        "Row-level value comparison skipped — "
+                        "Power BI row data is not available locally. "
+                        "Column schema was sourced from the PBIT template; "
+                        "VertiPaq-encoded PBIX data cannot be decoded to extract row values."
                     ),
                     "column_analyses": [],
                     "columns_analyzed": 0,
                     "mismatched_columns": 0,
                     "failure_reasons": [],
                     "twbx_row_count": len(twbx_tables[twbx_name]),
-                    "pbix_row_count": 0,
+                    "pbix_row_count": pbix_meta_rows,
                 })
                 continue
 

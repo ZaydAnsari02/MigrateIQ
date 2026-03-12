@@ -362,6 +362,7 @@ def _migrate_columns(engine) -> None:
         ],
         "report_pair": [
             ("run_id", "INTEGER"),
+            ("l3_result_json", "TEXT"),
         ],
         "validation_run": [
             ("errored", "INTEGER"),

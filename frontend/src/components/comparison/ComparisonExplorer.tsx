@@ -1299,8 +1299,24 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
             )}
 
             {/* Layer 3: Measure Equivalence */}
-            {cards.layer3 && pair.l3Result && (
+            {cards.layer3 && pair.l3Result ? (
               <L3MeasureResults l3={pair.l3Result} />
+            ) : cards.layer3 && (
+              <div className="bg-white border border-zinc-200 rounded-2xl shadow-sm p-5">
+                <div className="flex items-center gap-2 mb-2">
+                  <h4 className="text-sm font-semibold text-zinc-900">Measure Equivalence</h4>
+                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-zinc-100 text-zinc-500 uppercase tracking-wide">
+                    L3 · Deep Analysis
+                  </span>
+                </div>
+                {pair.storedL3Status && pair.storedL3Status !== "skipped" ? (
+                  <p className="text-[11px] text-zinc-400">
+                    L3 result not available for this run — Power BI row data could not be extracted from the PBIX DataModel (VertiPaq-encoded). Re-run with a <strong>.pbit</strong> template file to enable measure equivalence analysis.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-zinc-400">Not executed — no <strong>.pbit</strong> file was uploaded. Upload a Power BI Template (.pbit) alongside your .pbix to enable L3 measure equivalence validation.</p>
+                )}
+              </div>
             )}
 
             {/* ── Regression Log ────────────────────────────────────────── */}

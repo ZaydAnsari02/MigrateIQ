@@ -152,6 +152,10 @@ def compare_reports(
         pbix_tables_structure = pbix_parser.get_tables()
         pbix_is_remote        = pbix_parser.is_remote_dataset
 
+        # Log extracted PBIX table and row-count info for debugging
+        pbix_row_counts_metadata = {name: len(df) for name, df in pbix_tables.items()}
+        logger.info(f"PBIX tables loaded: {list(pbix_tables.keys())}")
+        logger.info(f"PBIX row counts from metadata: {pbix_row_counts_metadata}")
         logger.info(
             f"PBIX: Found {len(pbix_tables)} tables, "
             f"{len(pbix_measures)} measures, "
@@ -165,6 +169,9 @@ def compare_reports(
         # captures columns used in visuals).  When PBIT is supplied we replace
         # pbix_tables entirely with PBIT-derived DataFrames and mark every table
         # as schema-only (PBIT has no row data).
+        # Row counts are injected from PBIX metadata so L2 can display
+        # "Tableau rows: N | Power BI rows: M (from metadata)" even when
+        # actual value comparison is skipped.
         # When PBIT is not provided we fall back to the PBIX-extracted tables.
         schema_only_tables: set = set()
         if pbit_path:
@@ -172,11 +179,16 @@ def compare_reports(
                 pbit_primary = PbitParser(pbit_path)
                 pbit_primary.parse()
                 pbit_col_map = pbit_primary.get_data_tables()  # {name: [str | {"name":...}]}
+                # Build PBIT-derived DataFrames using PBIX metadata row counts so
+                # that the L2 panel shows actual row counts rather than 0 | 0.
                 pbix_tables = {
-                    tname: pd.DataFrame(columns=[
-                        c["name"] if isinstance(c, dict) else c
-                        for c in col_list
-                    ])
+                    tname: pd.DataFrame(
+                        index=range(pbix_row_counts_metadata.get(tname, 0)),
+                        columns=[
+                            c["name"] if isinstance(c, dict) else c
+                            for c in col_list
+                        ],
+                    )
                     for tname, col_list in pbit_col_map.items()
                 }
                 schema_only_tables = set(pbix_tables.keys())
@@ -185,7 +197,7 @@ def compare_reports(
                     f"PBIT used as primary schema source: "
                     f"{len(pbix_tables)} table(s) — "
                     + ", ".join(
-                        f"'{t}': {list(pbix_tables[t].columns)}"
+                        f"'{t}': {len(pbix_tables[t])} rows (metadata), cols={list(pbix_tables[t].columns)}"
                         for t in pbix_tables
                     )
                 )

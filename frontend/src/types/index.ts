@@ -3,7 +3,7 @@
 export type ValidationStatus = "PASS" | "FAIL" | "PENDING" | "RUNNING" | "ERROR" | "REVIEW";
 export type LayerStatus = "pass" | "fail" | "pending" | "running" | "review" | "skipped";
 export type DiffSeverity = "high" | "medium" | "low";
-export type DiffType = "Metric Mismatch" | "Missing Filter" | "Visual Mismatch" | "DAX Mismatch" | "Data Regression" | "Data Content Mismatch" | "Measure Mismatch";
+export type DiffType = "Metric Mismatch" | "Missing Filter" | "Visual Mismatch" | "DAX Mismatch" | "Data Regression" | "Data Content Mismatch" | "Measure Mismatch" | "Schema Mismatch";
 
 // ─── Core Entities ────────────────────────────────────────────────────────────
 

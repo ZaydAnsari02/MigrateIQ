@@ -665,21 +665,41 @@ class PbixParser:
     # ------------------------------------------------------------------
 
     def get_data_tables(self) -> Dict[str, pd.DataFrame]:
-        """Return table schemas as DataFrames (with dummy data if row counts exist)."""
+        """Return table schemas as DataFrames.
+
+        NOTE: PBIX files store data in VertiPaq (ABF) binary format which
+        cannot be decoded to extract actual row values locally.  This method
+        returns DataFrames with the correct column schema and row count from
+        embedded metadata (all cell values are NaN).  Callers must treat these
+        as schema-only; use a PBIT file for column names and this row count
+        only for display purposes.
+        """
         if not self.temp_dir:
             raise RuntimeError("PBIX file not parsed yet. Call parse() first.")
         data_frames = {}
         for table_name, table_info in self.tables.items():
             columns = [col["name"] for col in table_info.get("columns", [])]
             row_count = table_info.get("row_count", 0)
-            
+
             if row_count > 0:
-                # Create a dummy DataFrame with the correct number of rows to satisfy len(df)
+                # Shape is correct (rows from metadata) but all values are NaN —
+                # VertiPaq-encoded data cannot be read locally.
                 data_frames[table_name] = pd.DataFrame(index=range(row_count), columns=columns)
-                logger.info(f"Created dummy DataFrame for table '{table_name}' with {row_count} rows from metadata")
+                logger.info(
+                    f"PBIX table '{table_name}': {row_count} rows (metadata), "
+                    f"{len(columns)} cols — values unavailable (VertiPaq binary)"
+                )
             else:
                 data_frames[table_name] = pd.DataFrame(columns=columns)
-                logger.info(f"Created empty DataFrame for table '{table_name}' (no row count in metadata)")
+                logger.info(
+                    f"PBIX table '{table_name}': row count not in metadata, "
+                    f"{len(columns)} cols — schema only"
+                )
+
+        logger.info(
+            f"PBIX get_data_tables: {len(data_frames)} table(s) — "
+            f"row counts from metadata: { {n: len(df) for n, df in data_frames.items()} }"
+        )
         return data_frames
 
     def get_data_model(self) -> Dict[str, Any]:
