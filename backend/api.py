@@ -503,22 +503,39 @@ async def re_run_visual_validate(
 # ─── Layer-status helpers ─────────────────────────────────────────────────────
 
 def _infer_semantic_status(sem) -> str:
-    """Return the true layer-2 status, inferring from field data when stored status is PENDING."""
+    """Return the true layer-2 status inferred from actual field data.
+
+    column_value_status is authoritative: if it has run and passed, L2 = PASS.
+    DAX expression mismatches (flagged_fields / calc_fields) are only used as
+    a fallback when column_value_status has not run (None/PENDING), because the
+    model comparator often produces false-positives when the PBIX DataModel is
+    XPress9-compressed and its measures cannot be extracted.
+    """
     if sem is None:
         return "skipped"
-    # Column value analysis overrides to FAIL if it found mismatches
-    if getattr(sem, "column_value_status", None) == "FAIL":
+
+    cv = (getattr(sem, "column_value_status", None) or "").upper()
+
+    # Column value analysis is authoritative when it has actually run.
+    if cv == "FAIL":
         return "FAIL"
-    s = (sem.status or "PENDING").upper()
-    if s not in ("PENDING", ""):
-        return s
-    # Infer: any flagged/mismatched calc fields → FAIL
+    if cv == "PASS":
+        return "PASS"
+
+    # column_value_status not yet run — fall back to DAX expression comparison.
     if sem.flagged_fields and sem.flagged_fields > 0:
         return "FAIL"
     if any(getattr(cf, "status", None) not in ("MATCH", "PASS", None) for cf in (sem.calc_fields or [])):
         return "FAIL"
     if sem.matched_fields and sem.matched_fields > 0:
         return "PASS"
+    if sem.calc_fields and all(getattr(cf, "status", None) in ("MATCH", "PASS") for cf in sem.calc_fields):
+        return "PASS"
+
+    # Last resort: use the stored status
+    s = (sem.status or "PENDING").upper()
+    if s not in ("PENDING", ""):
+        return s
     return "PENDING"
 
 
@@ -1061,6 +1078,20 @@ async def debug_parse_tables(
         _shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ─── POST /login ──────────────────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/login")
+def login(body: LoginRequest):
+    if body.username not in USERS or USERS[body.username] != body.password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = str(uuid.uuid4())
+    SESSIONS[token] = body.username
+    return {"token": token, "username": body.username}
 # ─── POST /login ──────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):

@@ -425,7 +425,7 @@ function UnifiedColumnAnalysis({
         : mismatchedColumns === 0 && columnsAnalyzed > 0
           ? "text-emerald-600"
           : "text-amber-600",
-      subLabel: matchRate === "SCHEMA" ? "ONLY" : undefined,
+      subLabel: matchRate === "SCHEMA" ? "MATCH ONLY" : undefined,
     },
   ];
 
@@ -560,7 +560,7 @@ function UnifiedColumnAnalysis({
                       ) : isUnmatched ? (
                         <span className="text-[9px] font-bold text-amber-600 px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-200">UNMATCHED</span>
                       ) : isSchemaSkipped ? (
-                        <span className="text-[9px] font-bold text-blue-600 px-1.5 py-0.5 rounded-full bg-blue-50 border border-blue-200">SCHEMA ONLY</span>
+                        <span className="text-[9px] font-bold text-blue-600 px-2 py-0.5 rounded-md bg-blue-50 border border-blue-200 whitespace-nowrap">SCHEMA ONLY</span>
                       ) : (
                         <span className="text-[9px] font-bold text-emerald-600 px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200">PASS</span>
                       )}
@@ -843,7 +843,17 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
     return (stored as string).toLowerCase() as LayerStatus;
   })();
 
-  const storedL2Status: LayerStatus = ((pair?.layer2Status ?? "skipped") as string).toLowerCase() as LayerStatus;
+  // Derive effective L2 status to match what the Column Analysis card shows.
+  // If the card reports schema failures (from layer3Details) or value mismatches
+  // (from layer2Details), the L2 dot must show FAIL to stay consistent with the card.
+  const effectiveL2Status: LayerStatus = (() => {
+    const valDets = pair?.layer2Details?.columnValueDetails ?? [];
+    const schemaDets = pair?.layer3Details ?? [];
+    const schemaFails = schemaDets.filter((s: any) => s.result === "FAIL").length;
+    const mismatchedCols = valDets.reduce((acc: number, v: any) => acc + (v.mismatchedColumns ?? 0), 0);
+    if (schemaFails > 0 || mismatchedCols > 0) return "fail";
+    return ((pair?.layer2Status ?? "skipped") as string).toLowerCase() as LayerStatus;
+  })();
 
   // L3 status comes from pair.layer3Status, which the backend and backendResultToReportPair
   // both derive from the measure-equivalence result (l3Result.status) when a PBIT was uploaded,
@@ -854,7 +864,7 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
     // Trust the backend's overall status as the authoritative source (it accounts for
     // data-layer failures even when L3 is "skipped" due to no PBIT being uploaded).
     if ((pair?.overallStatus ?? "").toUpperCase() === "FAIL") return "FAIL";
-    const statuses = [effectiveL1Status, storedL2Status, storedL3Status];
+    const statuses = [effectiveL1Status, effectiveL2Status, storedL3Status];
     if (statuses.some(s => (s ?? "").toUpperCase() === "FAIL")) return "FAIL";
     return "PASS";
   })();
@@ -947,7 +957,7 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
                 <div className="flex items-center gap-1.5">
                   {[
                     { key: "L1", status: effectiveL1Status },
-                    { key: "L2", status: storedL2Status },
+                    { key: "L2", status: effectiveL2Status },
                     { key: "L3", status: storedL3Status },
                   ].map(l => {
                     const s = (l.status ?? "skipped").toLowerCase();
@@ -1008,10 +1018,6 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
                     Toggle Result Cards
                   </p>
                   <div className="flex flex-wrap gap-4">
-                    <Checkbox checked disabled label="Screenshot Comparison" labelActive="text-zinc-400" labelInactive="text-zinc-400"
-                      onChange={() => {}} activeColor="bg-zinc-300 border-zinc-300" />
-                    <Checkbox checked disabled label="AI Summary" labelActive="text-zinc-400" labelInactive="text-zinc-400"
-                      onChange={() => {}} activeColor="bg-zinc-300 border-zinc-300" />
                     <Checkbox
                       checked={cards.visualBreakdown}
                       onChange={() => toggleCard("visualBreakdown")}
@@ -1021,6 +1027,11 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
                       checked={cards.columnDataContent}
                       onChange={() => toggleCard("columnDataContent")}
                       label="Column Data Content"
+                    />
+                    <Checkbox
+                      checked={cards.layer3}
+                      onChange={() => toggleCard("layer3")}
+                      label="Measure Equivalence"
                     />
                     <Checkbox
                       checked={cards.regressionLog}
@@ -1287,8 +1298,8 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
               />
             )}
 
-            {/* ── Measure Equivalence (L3) — only shown when PBIT was uploaded ── */}
-            {pair.l3Result && (
+            {/* Layer 3: Measure Equivalence */}
+            {cards.layer3 && pair.l3Result && (
               <L3MeasureResults l3={pair.l3Result} />
             )}
 
@@ -1321,7 +1332,7 @@ export function ComparisonExplorer({ pairs, initialLeftId, onRefresh }: Comparis
                   ) : (
                     <div className="space-y-2">
                       {pair.differences.map((d: Difference, i: number) => {
-                        const displayLayer = (d.type as string) === "Data Regression" ? "L2" : d.layer;
+                        const displayLayer = d.layer;
                         const lc = LAYER_META[displayLayer as keyof typeof LAYER_META] ?? LAYER_META.L2;
                         const label = getDiffLabel(d.type, d.detail);
                         return (
