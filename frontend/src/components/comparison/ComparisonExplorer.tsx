@@ -404,12 +404,15 @@ function UnifiedColumnAnalysis({
 
   const allTablesSchemaOnly =
     tablesAnalyzed > 0 && allTableNames.every(t => skippedTableNames.has(t));
+  const schemaOnlyAllPassed = allTablesSchemaOnly && schemaFailures === 0;
 
-  const matchRate = allTablesSchemaOnly
+  const matchRate = schemaOnlyAllPassed
     ? "SCHEMA"
-    : columnsAnalyzed > 0
-      ? (((columnsAnalyzed - mismatchedColumns) / columnsAnalyzed) * 100).toFixed(1)
-      : "--";
+    : allTablesSchemaOnly
+      ? String(((tablesAnalyzed - schemaFailures) / tablesAnalyzed * 100).toFixed(1))
+      : columnsAnalyzed > 0
+        ? (((columnsAnalyzed - mismatchedColumns) / columnsAnalyzed) * 100).toFixed(1)
+        : "--";
 
   const stats = [
     { label: "Tables Analyzed",    value: String(tablesAnalyzed),          color: "text-zinc-800" },
@@ -422,10 +425,12 @@ function UnifiedColumnAnalysis({
       value: matchRate === "SCHEMA" ? "SCHEMA" : matchRate === "--" ? "--%" : `${matchRate}%`,
       color: matchRate === "SCHEMA"
         ? "text-blue-600"
-        : mismatchedColumns === 0 && columnsAnalyzed > 0
-          ? "text-emerald-600"
-          : "text-amber-600",
-      subLabel: matchRate === "SCHEMA" ? "MATCH ONLY" : undefined,
+        : allTablesSchemaOnly
+          ? (schemaFailures === 0 ? "text-emerald-600" : schemaFailures < tablesAnalyzed ? "text-amber-600" : "text-red-600")
+          : mismatchedColumns === 0 && columnsAnalyzed > 0
+            ? "text-emerald-600"
+            : "text-amber-600",
+      subLabel: matchRate === "SCHEMA" ? "MATCH ONLY" : allTablesSchemaOnly ? "SCHEMA ONLY" : undefined,
     },
   ];
 
@@ -503,7 +508,15 @@ function UnifiedColumnAnalysis({
                 const side = tableVal?.twbxColumns?.length ? "Tableau only" : "Power BI only";
                 summary = `Table found in ${side}. No match in other source.`;
               } else if (isSchemaSkipped) {
-                summary = "Schema matched. Data value comparison skipped (Power BI data not available locally).";
+                if (tableSchema?.result === "FAIL") {
+                  const parts = [];
+                  if (tableSchema.columnsMissingInPbi.length) parts.push(`${tableSchema.columnsMissingInPbi.length} col missing in PBI`);
+                  if (tableSchema.columnsMissingInTwbx.length) parts.push(`${tableSchema.columnsMissingInTwbx.length} col missing in Tableau`);
+                  if (tableSchema.columnTypeMismatches.length) parts.push(`${tableSchema.columnTypeMismatches.length} type mismatch`);
+                  summary = (parts.join(", ") || tableSchema.failureReasons?.[0] || "Schema mismatch identified") + ". Data value comparison skipped (Power BI data not available locally).";
+                } else {
+                  summary = "Schema matched. Data value comparison skipped (Power BI data not available locally).";
+                }
               } else if (tableSchema?.result === "FAIL") {
                 const parts = [];
                 if (tableSchema.columnsMissingInPbi.length) parts.push(`${tableSchema.columnsMissingInPbi.length} col missing in PBI`);
@@ -579,7 +592,7 @@ function UnifiedColumnAnalysis({
                               </p>
                             </div>
                           )}
-                          {isSchemaSkipped && (
+                          {isSchemaSkipped && tableSchema?.result !== "FAIL" && (
                             <div className="p-3 bg-blue-50 border border-blue-100 rounded-xl">
                               <p className="text-[11px] text-blue-800 leading-relaxed">
                                 <strong>Schema Validated:</strong> Table and column schema matched successfully. Data value comparison was skipped because Power BI row data is not available locally (remote dataset or compressed DataModel). Column schema was sourced from the PBIT template.
