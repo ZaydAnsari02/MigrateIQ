@@ -227,15 +227,15 @@ function L3MeasureResults({ l3 }: { l3: L3Result }) {
   const { summary, measure_results } = l3;
 
   return (
-    <div className="bg-white border border-rose-200 rounded-2xl shadow-sm overflow-hidden">
+    <div className="bg-white border border-violet-200 rounded-2xl shadow-sm overflow-hidden">
       {/* Header */}
-      <div className="px-5 py-4 border-b border-rose-100 bg-rose-50/40">
+      <div className="px-5 py-4 border-b border-violet-100 bg-violet-50/40">
         <div className="flex items-center justify-between mb-4">
           <div>
             <div className="flex items-center gap-2">
               <h4 className="text-sm font-semibold text-zinc-900">Measure Equivalence</h4>
-              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-700 uppercase tracking-wide">
-                L3 · Semantic
+              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700 uppercase tracking-wide">
+                L3 · Measures, DAX/Formulae
               </span>
             </div>
             <p className="text-[10px] text-zinc-400 mt-0.5">
@@ -263,7 +263,7 @@ function L3MeasureResults({ l3 }: { l3: L3Result }) {
             { label: "Failed",         value: summary.failed,         color: summary.failed > 0 ? "text-red-600" : "text-emerald-600" },
             { label: "Unknown",        value: summary.unknown,        color: summary.unknown > 0 ? "text-amber-600" : "text-zinc-400" },
           ].map(s => (
-            <div key={s.label} className="bg-white border border-rose-100 rounded-xl px-3 py-2.5">
+            <div key={s.label} className="bg-white border border-violet-100 rounded-xl px-3 py-2.5">
               <p className="text-[9px] text-zinc-400 uppercase tracking-wide">{s.label}</p>
               <p className={cn("text-sm font-bold mt-0.5 tabular-nums", s.color)}>{s.value}</p>
             </div>
@@ -385,8 +385,9 @@ function UnifiedColumnAnalysis({
   const schemaDetails = layer3Details ?? [];
 
   const matchedTableNames = new Set(valDetails.filter(v => v.result !== "SKIPPED").map(v => v.tableName));
+  const skippedTableNames = new Set(valDetails.filter(v => v.result === "SKIPPED").map(v => v.tableName));
   const schemaTableNames = new Set(schemaDetails.map(s => s.tableName));
-  const allTableNames = Array.from(new Set([...matchedTableNames, ...schemaTableNames])).sort();
+  const allTableNames = Array.from(new Set([...matchedTableNames, ...skippedTableNames, ...schemaTableNames])).sort();
 
   const tablesAnalyzed = allTableNames.length;
   const columnsAnalyzed = valDetails.reduce((s, v) => s + (v.columnsAnalyzed ?? 0), 0);
@@ -394,17 +395,38 @@ function UnifiedColumnAnalysis({
   const schemaFailures = schemaDetails.filter((s) => s.result === "FAIL").length;
   const typeMismatches = schemaDetails.reduce((s, t) => s + (t.columnTypeMismatches?.length ?? 0), 0);
 
-  const matchRate = columnsAnalyzed > 0
-    ? (((columnsAnalyzed - mismatchedColumns) / columnsAnalyzed) * 100).toFixed(1)
-    : "--";
+  // For schema-only tables (value analysis skipped, schema validated via PBIT),
+  // count matched columns from schemaDetails so cards reflect reality.
+  const schemaOnlyColumns = schemaDetails
+    .filter(s => skippedTableNames.has(s.tableName))
+    .reduce((sum, s) => sum + (s.columnsMatched?.length ?? 0), 0);
+  const totalColumnsDisplay = columnsAnalyzed + schemaOnlyColumns;
+
+  const allTablesSchemaOnly =
+    tablesAnalyzed > 0 && allTableNames.every(t => skippedTableNames.has(t));
+
+  const matchRate = allTablesSchemaOnly
+    ? "SCHEMA"
+    : columnsAnalyzed > 0
+      ? (((columnsAnalyzed - mismatchedColumns) / columnsAnalyzed) * 100).toFixed(1)
+      : "--";
 
   const stats = [
-    { label: "Tables Analyzed",    value: String(tablesAnalyzed),     color: "text-zinc-800" },
-    { label: "Columns Analyzed",   value: String(columnsAnalyzed),    color: "text-zinc-800" },
-    { label: "Value Mismatches",   value: String(mismatchedColumns),  color: mismatchedColumns > 0 ? "text-red-600" : "text-emerald-600" },
-    { label: "Schema Failures",    value: String(schemaFailures),     color: schemaFailures > 0 ? "text-red-600" : "text-emerald-600" },
-    { label: "Type Mismatches",    value: String(typeMismatches),     color: typeMismatches > 0 ? "text-amber-600" : "text-emerald-600" },
-    { label: "Overall Match Rate", value: matchRate === "--" ? "--%" : `${matchRate}%`, color: mismatchedColumns === 0 && columnsAnalyzed > 0 ? "text-emerald-600" : "text-amber-600" },
+    { label: "Tables Analyzed",    value: String(tablesAnalyzed),          color: "text-zinc-800" },
+    { label: "Columns Analyzed",   value: String(totalColumnsDisplay),      color: "text-zinc-800" },
+    { label: "Value Mismatches",   value: String(mismatchedColumns),        color: mismatchedColumns > 0 ? "text-red-600" : "text-emerald-600" },
+    { label: "Schema Failures",    value: String(schemaFailures),           color: schemaFailures > 0 ? "text-red-600" : "text-emerald-600" },
+    { label: "Type Mismatches",    value: String(typeMismatches),           color: typeMismatches > 0 ? "text-amber-600" : "text-emerald-600" },
+    {
+      label: "Overall Match Rate",
+      value: matchRate === "SCHEMA" ? "SCHEMA" : matchRate === "--" ? "--%" : `${matchRate}%`,
+      color: matchRate === "SCHEMA"
+        ? "text-blue-600"
+        : mismatchedColumns === 0 && columnsAnalyzed > 0
+          ? "text-emerald-600"
+          : "text-amber-600",
+      subLabel: matchRate === "SCHEMA" ? "ONLY" : undefined,
+    },
   ];
 
   if (tablesAnalyzed === 0) {
@@ -433,9 +455,19 @@ function UnifiedColumnAnalysis({
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
           {stats.map((s) => (
-            <div key={s.label} className="bg-white border border-violet-100 rounded-xl px-3 py-2.5">
+            <div key={s.label} className={cn(
+              "border rounded-xl px-3 py-2.5",
+              s.subLabel ? "bg-blue-50 border-blue-100" : "bg-white border-violet-100"
+            )}>
               <p className="text-[9px] text-zinc-400 uppercase tracking-wide">{s.label}</p>
-              <p className={cn("text-sm font-bold mt-0.5 tabular-nums", s.color)}>{s.value}</p>
+              {s.subLabel ? (
+                <div className="flex items-baseline gap-0.5 mt-0.5">
+                  <p className={cn("text-sm font-bold tabular-nums leading-none", s.color)}>{s.value}</p>
+                  <p className={cn("text-[8px] font-bold", s.color)}>{s.subLabel}</p>
+                </div>
+              ) : (
+                <p className={cn("text-sm font-bold mt-0.5 tabular-nums", s.color)}>{s.value}</p>
+              )}
             </div>
           ))}
         </div>
@@ -459,13 +491,19 @@ function UnifiedColumnAnalysis({
               const tableSchema = schemaDetails.find((s) => s.tableName.toLowerCase().trim() === tableName.toLowerCase().trim());
 
               const isOpen = openTables.has(tableName);
-              const isUnmatched = tableVal?.result === "SKIPPED";
+              // SKIPPED means value analysis was skipped (e.g. remote/compressed PBI dataset),
+              // NOT that the table is unmatched. Only treat as unmatched when there is no
+              // schema comparison result either.
+              const isSchemaSkipped = tableVal?.result === "SKIPPED" && !!tableSchema;
+              const isUnmatched = tableVal?.result === "SKIPPED" && !tableSchema;
               const isFail = tableSchema?.result === "FAIL" || (tableVal && tableVal.result === "FAIL");
 
               let summary = "";
               if (isUnmatched) {
                 const side = tableVal?.twbxColumns?.length ? "Tableau only" : "Power BI only";
                 summary = `Table found in ${side}. No match in other source.`;
+              } else if (isSchemaSkipped) {
+                summary = "Schema matched. Data value comparison skipped (Power BI data not available locally).";
               } else if (tableSchema?.result === "FAIL") {
                 const parts = [];
                 if (tableSchema.columnsMissingInPbi.length) parts.push(`${tableSchema.columnsMissingInPbi.length} col missing in PBI`);
@@ -482,7 +520,7 @@ function UnifiedColumnAnalysis({
                 <React.Fragment key={tableName}>
                   <tr className={cn(
                     "transition-colors group",
-                    isFail ? "bg-red-50/20 hover:bg-red-50/40" : isUnmatched ? "bg-amber-50/20 hover:bg-amber-50/40" : "bg-white hover:bg-zinc-50/60"
+                    isFail ? "bg-red-50/20 hover:bg-red-50/40" : isUnmatched ? "bg-amber-50/20 hover:bg-amber-50/40" : isSchemaSkipped ? "bg-blue-50/10 hover:bg-blue-50/20" : "bg-white hover:bg-zinc-50/60"
                   )}>
                     <td className="px-4 py-3">
                       <button
@@ -508,7 +546,7 @@ function UnifiedColumnAnalysis({
                         return count != null ? `${count.toLocaleString()} rows` : "--";
                       })()}
                     </td>
-                    <td className={cn("px-4 py-3 text-[10px] italic", isFail ? "text-red-600 font-medium" : isUnmatched ? "text-amber-700" : "text-zinc-400")}>
+                    <td className={cn("px-4 py-3 text-[10px] italic", isFail ? "text-red-600 font-medium" : isUnmatched ? "text-amber-700" : isSchemaSkipped ? "text-blue-600" : "text-zinc-400")}>
                       {summary}
                     </td>
                     <td className="px-4 py-3">
@@ -521,6 +559,8 @@ function UnifiedColumnAnalysis({
                         <span className="text-[9px] font-bold text-red-600 px-1.5 py-0.5 rounded-full bg-red-50 border border-red-200">FAIL</span>
                       ) : isUnmatched ? (
                         <span className="text-[9px] font-bold text-amber-600 px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-200">UNMATCHED</span>
+                      ) : isSchemaSkipped ? (
+                        <span className="text-[9px] font-bold text-blue-600 px-1.5 py-0.5 rounded-full bg-blue-50 border border-blue-200">SCHEMA ONLY</span>
                       ) : (
                         <span className="text-[9px] font-bold text-emerald-600 px-1.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200">PASS</span>
                       )}
@@ -536,6 +576,13 @@ function UnifiedColumnAnalysis({
                               <p className="text-[11px] text-amber-800 leading-relaxed">
                                 <strong>Comparison Skipped:</strong> No matching table was found in the other environment for <code>{tableName}</code>.
                                 This usually happens when table names differ or a table was only uploaded in one report.
+                              </p>
+                            </div>
+                          )}
+                          {isSchemaSkipped && (
+                            <div className="p-3 bg-blue-50 border border-blue-100 rounded-xl">
+                              <p className="text-[11px] text-blue-800 leading-relaxed">
+                                <strong>Schema Validated:</strong> Table and column schema matched successfully. Data value comparison was skipped because Power BI row data is not available locally (remote dataset or compressed DataModel). Column schema was sourced from the PBIT template.
                               </p>
                             </div>
                           )}

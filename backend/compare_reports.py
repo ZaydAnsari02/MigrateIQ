@@ -18,8 +18,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+import pandas as pd
 from parsers.twbx_parser import TwbxParser
 from parsers.pbix_parser import PbixParser
+from parsers.pbit_parser import PbitParser
 from comparators.data_comparator import DataComparator
 from comparators.data_comparator_pbit import PbitDataComparator
 from comparators.data_router import run_data_comparison
@@ -148,6 +150,7 @@ def compare_reports(
         pbix_measures         = pbix_parser.get_measures()
         pbix_relationships    = pbix_parser.get_relationships()
         pbix_tables_structure = pbix_parser.get_tables()
+        pbix_is_remote        = pbix_parser.is_remote_dataset
 
         logger.info(
             f"PBIX: Found {len(pbix_tables)} tables, "
@@ -155,56 +158,51 @@ def compare_reports(
             f"{len(pbix_relationships)} relationships"
         )
 
-        # ── PBIT schema fallback for L2 (XPress9-compressed PBIX) ───────
-        # When the PBIX DataModel is XPress9-compressed the parser cannot
-        # read the full column schema — it falls back to Report/Layout which
-        # only contains columns referenced by visuals (often measures, not raw
-        # table columns).  The .pbit DataModelSchema is always plain JSON and
-        # has the authoritative table + column list, so we use it instead.
-        if pbit_path and pbix_parser.datamodel_xpress9:
-            import pandas as pd
-            from parsers.pbit_parser import PbitParser
+        # ── Use PBIT as primary schema source when provided ──────────────
+        # PBIT DataModelSchema contains ALL columns (including those not used in
+        # any visual) and is far more reliable than parsing the PBIX DataModel
+        # (which is often XPress9-compressed) or the Report/Layout (which only
+        # captures columns used in visuals).  When PBIT is supplied we replace
+        # pbix_tables entirely with PBIT-derived DataFrames and mark every table
+        # as schema-only (PBIT has no row data).
+        # When PBIT is not provided we fall back to the PBIX-extracted tables.
+        schema_only_tables: set = set()
+        if pbit_path:
             try:
-                pbit_schema_parser = PbitParser(pbit_path)
-                pbit_schema_parser.parse()
-                pbit_schema = pbit_schema_parser.get_data_tables()  # Dict[str, List[Dict]]
-                pbit_schema_parser.cleanup()
-
-                # Map Power BI dataType strings to pandas dtypes so that type
-                # comparisons against the TWBX DataFrame don't produce false
-                # "type mismatch" failures on numeric columns.
-                _PBIT_DTYPE = {
-                    "int64":    "Int64",
-                    "double":   "float64",
-                    "decimal":  "float64",
-                    "boolean":  "bool",
-                    "dateTime": "datetime64[ns]",
-                    "string":   "object",
+                pbit_primary = PbitParser(pbit_path)
+                pbit_primary.parse()
+                pbit_col_map = pbit_primary.get_data_tables()  # {name: [str | {"name":...}]}
+                pbix_tables = {
+                    tname: pd.DataFrame(columns=[
+                        c["name"] if isinstance(c, dict) else c
+                        for c in col_list
+                    ])
+                    for tname, col_list in pbit_col_map.items()
                 }
-
-                enriched = 0
-                for tname, col_info in pbit_schema.items():
-                    if col_info and isinstance(col_info[0], dict):
-                        dtype_map = {
-                            c["name"]: _PBIT_DTYPE.get(c.get("dataType", "string"), "object")
-                            for c in col_info
-                        }
-                        pbix_tables[tname] = pd.DataFrame({
-                            col: pd.array([], dtype=dtype)
-                            for col, dtype in dtype_map.items()
-                        })
-                    else:
-                        pbix_tables[tname] = pd.DataFrame(columns=col_info)
-                    enriched += 1
-
-                if enriched:
-                    logger.info(
-                        f"PBIT schema fallback applied: replaced {enriched} "
-                        f"table(s) with full column definitions from PBIT "
-                        f"(PBIX DataModel was XPress9-compressed)"
+                schema_only_tables = set(pbix_tables.keys())
+                pbit_primary.cleanup()
+                logger.info(
+                    f"PBIT used as primary schema source: "
+                    f"{len(pbix_tables)} table(s) — "
+                    + ", ".join(
+                        f"'{t}': {list(pbix_tables[t].columns)}"
+                        for t in pbix_tables
                     )
-            except Exception as pbit_err:
-                logger.warning(f"PBIT schema fallback failed: {pbit_err}")
+                )
+            except Exception as e:
+                logger.warning(f"Could not use PBIT as primary schema source: {e}; falling back to PBIX")
+                # Fall back to remote-dataset handling if applicable
+                if pbix_is_remote:
+                    schema_only_tables = set(pbix_tables.keys())
+        elif pbix_is_remote:
+            # No PBIT provided but PBIX connects to a remote Power BI Service
+            # dataset — row data is unavailable locally.  Mark all tables as
+            # schema-only so that row-count and value-overlap checks are skipped.
+            schema_only_tables = set(pbix_tables.keys())
+            logger.info(
+                "Remote dataset detected — all tables marked as schema-only; "
+                "data value analysis will be skipped."
+            )
 
         # ── Compare data ────────────────────────────────────────────────
         logger.info("Comparing data...")
@@ -213,13 +211,15 @@ def compare_reports(
             twbx_tables,
             pbix_tables,
             pbix_path,
-            verbose=verbose
+            verbose=verbose,
+            schema_only_tables=schema_only_tables,
         )
 
         # ── Analyse column data content (L2) ────────────────────────────
         logger.info("Analysing column data content...")
         column_value_result, column_value_details = data_comparator.analyze_column_data(
-            twbx_tables, pbix_tables, verbose=verbose
+            twbx_tables, pbix_tables, verbose=verbose,
+            schema_only_tables=schema_only_tables,
         )
 
         # ── Compare semantic model ───────────────────────────────────────
@@ -322,9 +322,9 @@ Examples:
         default=None,
         metavar="PATH",
         help=(
-            "Optional path to a Power BI Template (.pbit) file. "
-            "Used as a schema fallback for L2 column comparison when the "
-            "PBIX DataModel is XPress9-compressed and unreadable."
+            "Optional Power BI Template (.pbit) file. When provided, its "
+            "DataModelSchema is used as the primary schema source for L2 "
+            "column comparison (more reliable than PBIX DataModel parsing)."
         ),
     )
     parser.add_argument(

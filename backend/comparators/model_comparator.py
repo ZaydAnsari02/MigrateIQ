@@ -14,9 +14,17 @@ logger = logging.getLogger(__name__)
 def _norm_name(name: str) -> str:
     """
     Normalise a measure / column name for comparison.
-    Rules: case-insensitive, spaces and underscores are equivalent.
+    Rules: case-insensitive; spaces, underscores, hyphens and dots are
+    equivalent; CamelCase boundaries are treated as separators; Power BI
+    bracket notation is stripped.
     """
-    return re.sub(r"[ _]+", "_", name.lower().strip())
+    s = name.strip()
+    s = re.sub(r'^\[|\]$', '', s)
+    s = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s)
+    s = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', s)
+    s = re.sub(r'[ _\-\.]+', '_', s.lower())
+    s = re.sub(r'_+', '_', s).strip('_')
+    return s
 
 
 

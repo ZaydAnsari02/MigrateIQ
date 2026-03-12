@@ -7,8 +7,13 @@ from comparators.data_comparator_pbit import PbitDataComparator
 logger = logging.getLogger(__name__)
 
 
-def run_data_comparison(twbx_tables, powerbi_tables, powerbi_path, verbose=False):
-
+def run_data_comparison(
+    twbx_tables,
+    powerbi_tables,
+    powerbi_path,
+    verbose=False,
+    schema_only_tables=None,
+):
     ext = Path(powerbi_path).suffix.lower()
 
     if ext == ".pbix":
@@ -22,8 +27,8 @@ def run_data_comparison(twbx_tables, powerbi_tables, powerbi_path, verbose=False
     else:
         raise ValueError(f"Unsupported Power BI file type: {ext}")
 
-    return comparator.compare_tables(
-        twbx_tables,
-        powerbi_tables,
-        verbose=verbose
-    )
+    kwargs = {"verbose": verbose}
+    if schema_only_tables is not None and ext == ".pbix":
+        kwargs["schema_only_tables"] = schema_only_tables
+
+    return comparator.compare_tables(twbx_tables, powerbi_tables, **kwargs)

@@ -25,6 +25,7 @@ class PbixParser:
         self._raw_datamodel: bytes = b""
         self._decoded_datamodel: str = ""  # UTF-16 decoded text (for VertiPaq binary)
         self.datamodel_xpress9: bool = False  # True when DataModel is XPress9-compressed
+        self.is_remote_dataset: bool = False  # True when data lives in Power BI Service
 
     def parse(self) -> None:
         """Extract and parse PBIX file contents."""
@@ -35,6 +36,7 @@ class PbixParser:
                 zip_ref.extractall(self.temp_dir)
             logger.debug(f"Extracted PBIX to {self.temp_dir}")
 
+            self._detect_remote_dataset()
             self._parse_data_model()
             self._extract_relationships()
             self._extract_measures()
@@ -42,6 +44,41 @@ class PbixParser:
         except Exception as e:
             logger.error(f"Error parsing PBIX file: {e}")
             raise
+
+    def _detect_remote_dataset(self) -> None:
+        """
+        Detect whether this PBIX report connects to a remote Power BI Service
+        dataset rather than embedding its own data.
+
+        When `Connections` contains a `RemoteArtifacts` entry with a
+        `DatasetId`, the DataModel binary holds only metadata/schema — the
+        actual row data lives in the cloud and cannot be read locally.
+        """
+        connections_path = os.path.join(self.temp_dir, "Connections")
+        if not os.path.exists(connections_path):
+            return
+        try:
+            with open(connections_path, "rb") as f:
+                raw = f.read()
+            # Connections is UTF-8 JSON (no BOM in most versions)
+            for enc in ("utf-8", "utf-16-le", "utf-8-sig"):
+                try:
+                    text = raw.decode(enc)
+                    break
+                except Exception:
+                    text = None
+            if not text:
+                return
+            conn = json.loads(text)
+            artifacts = conn.get("RemoteArtifacts", [])
+            if artifacts and any(a.get("DatasetId") for a in artifacts):
+                self.is_remote_dataset = True
+                logger.info(
+                    "PBIX uses a remote Power BI Service dataset — "
+                    "row data is not available locally."
+                )
+        except Exception as e:
+            logger.debug(f"Could not read Connections: {e}")
 
     # ------------------------------------------------------------------
     # DataModel loading
@@ -245,12 +282,27 @@ class PbixParser:
         if not tables and self._raw_datamodel:
             tables = self._scan_tables_from_binary()
 
-        # Path 3 — Report/Layout fallback (handles XPress9-compressed DataModels)
-        # Newer Power BI Desktop files compress the DataModel with XPress9, which
-        # is unreadable without the Windows API.  The Report/Layout file is always
-        # plain UTF-16 LE JSON and contains every table/column referenced by visuals.
-        if not tables and self.temp_dir:
-            tables = self._extract_tables_from_layout()
+        # Path 3 — Report/Layout JSON (fallback when DataModel is compressed
+        # or in an unsupported format, e.g. XPress9-compressed PBIX files).
+        # Also used to fill in missing columns for tables found in path 2.
+        if self.temp_dir:
+            layout_tables = self._extract_tables_from_layout()
+            if layout_tables:
+                if not tables:
+                    tables = layout_tables
+                    logger.info(
+                        f"Extracted {len(tables)} tables from Report/Layout"
+                    )
+                else:
+                    # Merge: add columns that the binary scan missed
+                    for tname, linfo in layout_tables.items():
+                        if tname not in tables:
+                            tables[tname] = linfo
+                        elif not tables[tname]["columns"] and linfo["columns"]:
+                            tables[tname]["columns"] = linfo["columns"]
+                            logger.debug(
+                                f"Filled columns for '{tname}' from layout"
+                            )
 
         self.tables = tables
         logger.info(f"Extracted {len(tables)} tables from PBIX")
@@ -258,90 +310,110 @@ class PbixParser:
 
     def _extract_tables_from_layout(self) -> Dict[str, Dict[str, Any]]:
         """
-        Extract table and column names referenced in Report/Layout.
+        Extract table and column names from the Report/Layout JSON.
 
-        Used as a last-resort fallback when the DataModel is XPress9-compressed
-        and cannot be decoded.  The layout JSON contains every Entity (table) and
-        Property (column) that visuals on the report reference, which is sufficient
-        for schema-level comparison even though row counts are unavailable.
+        The layout file is stored as UTF-16-LE (often without BOM) and
+        contains visual configurations. Each visual's prototypeQuery carries
+        a 'From' list (entity aliases → table names) and a 'Select' list
+        (column Property references).  This method collects all unique
+        Entity → Property pairs across every visual in the report.
         """
         layout_path = os.path.join(self.temp_dir, "Report", "Layout")
         if not os.path.exists(layout_path):
-            logger.warning("Report/Layout not found — cannot fall back for table extraction")
             return {}
 
         try:
             with open(layout_path, "rb") as f:
                 raw = f.read()
-            # Layout is always UTF-16 LE (with or without BOM)
-            text = raw.decode("utf-16-le", errors="replace").lstrip("\ufeff")
-            layout = json.loads(text)
+            # Layout is UTF-16-LE (may lack BOM)
+            text = raw.decode("utf-16-le", errors="ignore")
+            layout_json = json.loads(text)
         except Exception as e:
             logger.warning(f"Could not parse Report/Layout: {e}")
             return {}
 
-        tables: Dict[str, Dict[str, Any]] = {}
+        tables: Dict[str, set] = {}
 
         def _walk(obj: Any) -> None:
+            """Recursively walk any JSON value, parsing nested JSON strings."""
             if isinstance(obj, dict):
-                entity = obj.get("Entity") or obj.get("entity")
-                prop   = obj.get("Property") or obj.get("property")
-                if entity and isinstance(entity, str):
-                    if entity not in tables:
-                        tables[entity] = {
-                            "name": entity,
-                            "display_name": entity,
-                            "row_count": 0,
-                            "columns": [],
-                            "_col_set": set(),
-                        }
-                    if prop and isinstance(prop, str):
-                        if prop not in tables[entity]["_col_set"]:
-                            tables[entity]["_col_set"].add(prop)
-                            tables[entity]["columns"].append(
-                                {"name": prop, "data_type": "unknown", "is_hidden": False}
-                            )
-                # Also handle dot-notation queryRef: "test_metrics.Category"
-                for key in ("queryRef",):
-                    val = obj.get(key)
-                    if isinstance(val, str) and "." in val:
-                        tbl, col = val.split(".", 1)
-                        if tbl and col:
-                            if tbl not in tables:
-                                tables[tbl] = {
-                                    "name": tbl,
-                                    "display_name": tbl,
-                                    "row_count": 0,
-                                    "columns": [],
-                                    "_col_set": set(),
-                                }
-                            if col not in tables[tbl]["_col_set"]:
-                                tables[tbl]["_col_set"].add(col)
-                                tables[tbl]["columns"].append(
-                                    {"name": col, "data_type": "unknown", "is_hidden": False}
+                # prototypeQuery carries From + Select
+                if "From" in obj and "Select" in obj:
+                    alias_map: Dict[str, str] = {}
+                    for item in obj.get("From", []):
+                        if isinstance(item, dict):
+                            alias = item.get("Name", "")
+                            entity = item.get("Entity", "")
+                            if alias and entity:
+                                alias_map[alias] = entity
+                                if entity not in tables:
+                                    tables[entity] = set()
+
+                    def _extract_col(node: Any) -> None:
+                        """
+                        Recursively extract Column.Property refs.
+                        Skips Measure nodes — measures are not table columns.
+                        Handles Aggregation nodes by drilling into their inner
+                        Column (e.g. CountNonNull wrapping a Column ref).
+                        """
+                        if not isinstance(node, dict):
+                            if isinstance(node, list):
+                                for item in node:
+                                    _extract_col(item)
+                            return
+                        for key, val in node.items():
+                            if key == "Measure":
+                                # Measures are NOT table columns — skip entirely
+                                continue
+                            elif key == "Column" and isinstance(val, dict):
+                                # Direct column reference: extract its Property
+                                prop = val.get("Property", "")
+                                src = (
+                                    val.get("Expression", {})
+                                    .get("SourceRef", {})
+                                    .get("Source", "")
                                 )
+                                entity = alias_map.get(src)
+                                if entity and prop:
+                                    tables[entity].add(prop)
+                                # Still recurse in case of nested structures
+                                _extract_col(val)
+                            elif isinstance(val, (dict, list)):
+                                _extract_col(val)
+
+                    for sel in obj.get("Select", []):
+                        _extract_col(sel)
+
                 for v in obj.values():
                     _walk(v)
+
             elif isinstance(obj, list):
                 for item in obj:
                     _walk(item)
-            elif isinstance(obj, str) and 2 < len(obj) < 5000:
-                try:
-                    _walk(json.loads(obj))
-                except Exception:
-                    pass
 
-        _walk(layout)
+            elif isinstance(obj, str):
+                # Nested JSON strings are common in Layout config/query fields
+                stripped = obj.strip()
+                if stripped.startswith("{") or stripped.startswith("["):
+                    try:
+                        _walk(json.loads(stripped))
+                    except Exception:
+                        pass
 
-        # Clean up internal helper key
-        for tbl in tables.values():
-            tbl.pop("_col_set", None)
+        _walk(layout_json)
 
-        logger.info(
-            f"Extracted {len(tables)} table(s) from Report/Layout fallback: "
-            f"{list(tables.keys())}"
-        )
-        return tables
+        result: Dict[str, Dict[str, Any]] = {}
+        for entity, cols in tables.items():
+            result[entity] = {
+                "name": entity,
+                "display_name": entity,
+                "row_count": 0,
+                "columns": [
+                    {"name": c, "data_type": "unknown", "is_hidden": False}
+                    for c in sorted(cols)
+                ],
+            }
+        return result
 
     def _scan_tables_from_binary(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -361,8 +433,10 @@ class PbixParser:
         if self._decoded_datamodel:
             text = self._decoded_datamodel
 
-            # Table names: <Name> (<id>).tbl
-            for m in re.finditer(r'([A-Za-z][A-Za-z0-9 _$-]+?) \(\d+\)\.tbl', text):
+            # Table names: <Name> (<id>).tbl  (space before paren is optional)
+            for m in re.finditer(
+                r'([A-Za-z0-9][A-Za-z0-9 _$\-\.]*?)\s*\(\d+\)\.tbl', text
+            ):
                 name = m.group(1).strip()
                 if name and name not in tables:
                     tables[name] = {
@@ -373,8 +447,9 @@ class PbixParser:
                     }
 
             # Column references: H$<Table> (<id>)$<Column> (<id>)
+            # Space before the id-parenthesis is optional in some PBI versions.
             col_pat = re.compile(
-                r'H\$([^\$\(\x00-\x1f]+?) \(\d+\)\$([^\$\(\x00-\x1f]+?) \(\d+\)'
+                r'H\$([^\$\x00-\x1f]+?)\s*\(\d+\)\$([^\$\x00-\x1f]+?)\s*\(\d+\)'
             )
             for m in col_pat.finditer(text):
                 tbl = m.group(1).strip()
@@ -406,15 +481,15 @@ class PbixParser:
         if not raw:
             return tables
 
-        # Table names
-        for m in re.finditer(rb'([A-Za-z][A-Za-z0-9 _]+) \(\d+\)\.tbl', raw):
+        # Table names (space before paren optional)
+        for m in re.finditer(rb'([A-Za-z0-9][A-Za-z0-9 _\-\.]*?)\s*\(\d+\)\.tbl', raw):
             name = m.group(1).decode("utf-8", errors="replace").strip()
             if name and name not in tables:
                 tables[name] = {"name": name, "display_name": name, "columns": [], "row_count": 0}
 
-        # Columns — pattern: H$<table> (<id>)$<col> (<id>)
+        # Columns — pattern: H$<table> (<id>)$<col> (<id>)  (space optional)
         col_pat_b = re.compile(
-            rb'H\x24([^\x24\x28\x00-\x1f]+?) \(\d+\)\x24([^\x24\x28\x00-\x1f]+?) \(\d+\)'
+            rb'H\x24([^\x24\x00-\x1f]+?)\s*\(\d+\)\x24([^\x24\x00-\x1f]+?)\s*\(\d+\)'
         )
         for m in col_pat_b.finditer(raw):
             tbl = m.group(1).decode("utf-8", errors="replace").strip()

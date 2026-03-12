@@ -265,9 +265,9 @@ export function useExportReport() {
             badge(status, bx, y2, LAYER_BW);
           }
         };
-        layerBadge(pair.layer1Status, COL.l1, rY);
-        layerBadge(pair.layer2Status, COL.l2, rY);
-        layerBadge("pass",            COL.l3, rY);
+        layerBadge(pair.layer1Status,  COL.l1, rY);
+        layerBadge(pair.layer2Status,  COL.l2, rY);
+        layerBadge(pair.layer3Status,  COL.l3, rY);
 
         y += ROW_H;
       });
@@ -339,7 +339,7 @@ export function useExportReport() {
         const layers = [
           { label: "L1  Visual",   status: pair.layer1Status },
           { label: "L2  Semantic", status: pair.layer2Status },
-          { label: "L3  Data",     status: "pass"            },
+          { label: "L3  Data",     status: pair.layer3Status },
         ];
 
         layers.forEach(l => {
@@ -656,6 +656,131 @@ export function useExportReport() {
             }
           });
           y += 6;
+        }
+
+        // ── L3 Measure Equivalence ─────────────────────────────────────
+        const l3MeasureResult = pair.l3Result;
+        if (l3MeasureResult && l3MeasureResult.measure_results?.length > 0) {
+          checkPage(40);
+          y += 10;
+          setFont(7.5, MID, "bold");
+          doc.text("L3 · MEASURE EQUIVALENCE", PAD, y);
+          y += 8;
+
+          // Description line
+          if (pair.layer3Description) {
+            const descLines: string[] = doc.splitTextToSize(pair.layer3Description, W - PAD * 2) as string[];
+            checkPage(descLines.length * 10 + 6);
+            setFont(7.5, [80, 80, 90]);
+            descLines.forEach((line, li) => {
+              doc.text(line, PAD, y + li * 10);
+            });
+            y += descLines.length * 10 + 4;
+          }
+
+          // Column layout: measure(155) tableau(120) dax(120) verdict(60) confidence(60) = 515pt
+          const L3M = {
+            measure:    { x: PAD,           w: 155, label: "Measure",          center: false },
+            tableau:    { x: PAD + 155,     w: 120, label: "Tableau Formula",  center: false },
+            dax:        { x: PAD + 275,     w: 120, label: "DAX Formula",      center: false },
+            verdict:    { x: PAD + 395,     w: 60,  label: "Verdict",          center: true  },
+            confidence: { x: PAD + 455,     w: 60,  label: "Confidence",       center: true  },
+          };
+
+          // Header
+          doc.setFillColor(255, 242, 242);
+          doc.rect(PAD, y, W - PAD * 2, 18, "F");
+          const l3mhY = y + 12;
+          Object.values(L3M).forEach(col => {
+            setFont(7, [180, 60, 60], "bold");
+            if (col.center) {
+              doc.text(col.label.toUpperCase(), col.x + col.w / 2, l3mhY, { align: "center" });
+            } else {
+              doc.text(col.label.toUpperCase(), col.x + 4, l3mhY);
+            }
+          });
+          y += 18;
+
+          l3MeasureResult.measure_results.forEach((mr, idx) => {
+            const reasonLines: string[] = doc.splitTextToSize(mr.reason || "—", L3M.dax.w - 6) as string[];
+            const tabLines:    string[] = doc.splitTextToSize(mr.tableau_formula || "—", L3M.tableau.w - 6) as string[];
+            const daxLines:    string[] = doc.splitTextToSize(mr.dax_formula || "—", L3M.dax.w - 6) as string[];
+            const rowLines = Math.max(1, tabLines.length, daxLines.length, reasonLines.length);
+            const ROW_H_M = rowLines * 9 + 10;
+
+            checkPage(ROW_H_M + 2);
+            doc.setFillColor(...(idx % 2 === 0 ? WHITE : LIGHT));
+            doc.rect(PAD, y, W - PAD * 2, ROW_H_M, "F");
+            const rYm = y + 10;
+
+            // Measure name (truncated to 1 line)
+            const mLines = doc.splitTextToSize(mr.measure, L3M.measure.w - 6) as string[];
+            setFont(7.5, DARK, "bold");
+            doc.text(mLines[0] + (mLines.length > 1 ? "…" : ""), L3M.measure.x + 4, rYm);
+
+            // Tableau formula
+            setFont(6.5, [80, 80, 90]);
+            tabLines.forEach((line, li) => doc.text(line, L3M.tableau.x + 4, rYm + li * 9));
+
+            // DAX formula
+            daxLines.forEach((line, li) => doc.text(line, L3M.dax.x + 4, rYm + li * 9));
+
+            // Verdict badge
+            const verdict = (mr.verdict || "unknown").toLowerCase();
+            const L3M_BW = 44;
+            if (verdict === "pass") {
+              badge("pass", L3M.verdict.x + (L3M.verdict.w - L3M_BW) / 2, rYm + 2, L3M_BW);
+            } else if (verdict === "fail") {
+              badge("fail", L3M.verdict.x + (L3M.verdict.w - L3M_BW) / 2, rYm + 2, L3M_BW);
+            } else {
+              setFont(7, MID);
+              doc.text(mr.verdict?.toUpperCase() ?? "—", L3M.verdict.x + L3M.verdict.w / 2, rYm + 2, { align: "center" });
+            }
+
+            // Confidence
+            const conf = (mr.confidence || "—").toUpperCase();
+            const confCol: [number,number,number] = conf === "HIGH" ? [34,197,94] : conf === "MEDIUM" ? [245,158,11] : MID;
+            setFont(7, confCol, "bold");
+            doc.text(conf, L3M.confidence.x + L3M.confidence.w / 2, rYm + 2, { align: "center" });
+
+            y += ROW_H_M;
+          });
+
+          // Missing measures summary
+          const missingInPbit  = l3MeasureResult.summary?.missing_in_pbit  ?? [];
+          const missingInTwbx  = l3MeasureResult.summary?.missing_in_twbx  ?? [];
+          if (missingInPbit.length > 0 || missingInTwbx.length > 0) {
+            checkPage(14);
+            y += 4;
+            if (missingInPbit.length > 0) {
+              const txt = `Missing in Power BI: ${missingInPbit.join(", ")}`;
+              const lines = doc.splitTextToSize(txt, W - PAD * 2) as string[];
+              checkPage(lines.length * 9 + 4);
+              setFont(7, RED_TEXT);
+              lines.forEach((line, li) => doc.text(line, PAD, y + li * 9));
+              y += lines.length * 9 + 2;
+            }
+            if (missingInTwbx.length > 0) {
+              const txt = `Missing in Tableau: ${missingInTwbx.join(", ")}`;
+              const lines = doc.splitTextToSize(txt, W - PAD * 2) as string[];
+              checkPage(lines.length * 9 + 4);
+              setFont(7, RED_TEXT);
+              lines.forEach((line, li) => doc.text(line, PAD, y + li * 9));
+              y += lines.length * 9 + 2;
+            }
+          }
+
+          y += 6;
+        } else if (l3MeasureResult?.description) {
+          // No measures but there's a description (e.g. "No measures found to compare.")
+          checkPage(30);
+          y += 10;
+          setFont(7.5, MID, "bold");
+          doc.text("L3 · MEASURE EQUIVALENCE", PAD, y);
+          y += 8;
+          setFont(7.5, [80, 80, 90]);
+          doc.text(l3MeasureResult.description, PAD, y);
+          y += 12;
         }
 
         // ── Differences (Regression Log) ───────────────────────────────

@@ -306,9 +306,18 @@ async def validate_reports(
         if pbit_path:
             Path(pbit_path).unlink(missing_ok=True)
         
-        # Clean up screenshot temp files and extracted dirs
-        shutil.rmtree(str(BACKEND_DIR / "temp"), ignore_errors=True)
-        (BACKEND_DIR / "temp").mkdir(exist_ok=True)
+        # Clean up screenshot temp files and extracted dirs inside temp/
+        # (do NOT remove the directory itself — uvicorn's reload watcher will
+        #  crash if it tries to scan a directory that has been deleted)
+        temp_dir = BACKEND_DIR / "temp"
+        for item in temp_dir.iterdir():
+            try:
+                if item.is_dir():
+                    shutil.rmtree(str(item), ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         return result
     except HTTPException:

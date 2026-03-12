@@ -15,13 +15,25 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Column name normalisation
 #
-# Rules (per spec):
+# Rules:
 #   1. Case-insensitive
-#   2. Spaces and underscores are equivalent
+#   2. Spaces, underscores, hyphens, and dots are equivalent separators
+#   3. CamelCase is split into tokens ("ProductID" → "product_id")
+#   4. Power BI bracket notation stripped ("[Column Name]" → "column_name")
 # ---------------------------------------------------------------------------
 def _norm_col(name: str) -> str:
     """Normalise a column name for comparison."""
-    return re.sub(r"[ _]+", "_", name.lower().strip())
+    s = name.strip()
+    # Strip Power BI bracket notation: [Column Name] → Column Name
+    s = re.sub(r'^\[|\]$', '', s)
+    # CamelCase → snake_case: "ProductID" → "Product_ID", "myCol" → "my_Col"
+    s = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s)
+    s = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', s)
+    # All separators (space, underscore, hyphen, dot) → underscore, lowercase
+    s = re.sub(r'[ _\-\.]+', '_', s.lower())
+    # Collapse multiple underscores and strip leading/trailing
+    s = re.sub(r'_+', '_', s).strip('_')
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -86,18 +98,60 @@ def _name_similarity(a: str, b: str) -> float:
 # ---------------------------------------------------------------------------
 FUZZY_THRESHOLD = 0.45     # minimum similarity to accept a fuzzy name match
 OVERLAP_THRESHOLD = 0.4    # minimum column overlap ratio to accept a column match
+COL_FUZZY_THRESHOLD = 0.80 # minimum similarity to fuzzy-match individual columns
+
+
+def _fuzzy_match_cols(
+    unmatched_twbx: List[str],
+    unmatched_pbix: List[str],
+) -> List[Tuple[str, str, float]]:
+    """
+    Greedily match column names by similarity when exact normalisation fails.
+
+    Returns a list of (twbx_col, pbix_col, score) pairs, best-score-first,
+    ensuring each column is used at most once.
+    """
+    if not unmatched_twbx or not unmatched_pbix:
+        return []
+    candidates: List[Tuple[float, str, str]] = []
+    for tc in unmatched_twbx:
+        for pc in unmatched_pbix:
+            score = _name_similarity(tc, pc)
+            if score >= COL_FUZZY_THRESHOLD:
+                candidates.append((score, tc, pc))
+    candidates.sort(reverse=True)
+    pairs: List[Tuple[str, str, float]] = []
+    used_t: set = set()
+    used_p: set = set()
+    for score, tc, pc in candidates:
+        if tc not in used_t and pc not in used_p:
+            pairs.append((tc, pc, score))
+            used_t.add(tc)
+            used_p.add(pc)
+    return pairs
 
 
 def _col_overlap(twbx_cols: List[str], pbix_cols: List[str]) -> float:
     """
-    Return the Jaccard overlap of two normalised column name sets.
+    Return the Jaccard overlap of two column name sets.
+
+    Uses exact normalised matching first, then fuzzy fallback so that
+    minor naming differences (e.g. "OrderID" vs "Order_ID") still contribute
+    to the overlap score used for table matching.
     Returns 0.0 if either set is empty.
     """
+    if not twbx_cols or not pbix_cols:
+        return 0.0
     a = {_norm_col(c) for c in twbx_cols}
     b = {_norm_col(c) for c in pbix_cols}
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
+    exact_count = len(a & b)
+    unmatched_a = list(a - b)
+    unmatched_b = list(b - a)
+    # Fuzzy count: how many unmatched-a columns have a similar unmatched-b peer
+    fuzzy_pairs = _fuzzy_match_cols(unmatched_a, unmatched_b)
+    total_matched = exact_count + len(fuzzy_pairs)
+    union_size = len(a | b)
+    return total_matched / union_size if union_size > 0 else 0.0
 
 
 def _match_tables(
@@ -212,6 +266,7 @@ class DataComparator:
         twbx_tables: Dict[str, pd.DataFrame],
         pbix_tables: Dict[str, pd.DataFrame],
         verbose: bool = False,
+        schema_only_tables: Optional[set] = None,
     ) -> Tuple[str, List[Dict[str, Any]]]:
         """
         Compare data tables from TWBX and PBIX.
@@ -221,6 +276,10 @@ class DataComparator:
           2. Fuzzy name match (≥60% similarity)  → PASS with name-diff note
           3. Column-overlap fallback (≥50% Jaccard) → PASS with name-diff note
           4. No match found → FAIL
+
+        schema_only_tables: table names (PBIX side) whose row count should be
+            skipped because the DataModel was unreadable and columns were
+            sourced from a PBIT template instead.
 
         Returns:
             (overall_result, list_of_per_table_results)
@@ -232,7 +291,10 @@ class DataComparator:
         logger.info(f"Comparing {len(table_matches)} tables")
 
         for match in table_matches:
-            result = self._compare_matched_pair(match, twbx_tables, pbix_tables, verbose)
+            result = self._compare_matched_pair(
+                match, twbx_tables, pbix_tables, verbose,
+                schema_only_tables=schema_only_tables or set(),
+            )
             results.append(result)
             if result["result"] == "FAIL":
                 all_pass = False
@@ -251,6 +313,7 @@ class DataComparator:
         twbx_tables: Dict[str, pd.DataFrame],
         pbix_tables: Dict[str, pd.DataFrame],
         verbose: bool,
+        schema_only_tables: Optional[set] = None,
     ) -> Dict[str, Any]:
         """Run all checks for a single matched (or unmatched) table pair."""
 
@@ -318,7 +381,18 @@ class DataComparator:
         twbx_df = twbx_tables[twbx_name]
         pbix_df = pbix_tables[pbix_name]
 
-        if twbx_rows == 0 and pbix_rows == 0:
+        # Row count check is skipped for schema-only tables (columns sourced
+        # from a PBIT template; the PBIX DataModel was unreadable, so 0 rows
+        # does not mean the Power BI report is actually empty).
+        is_schema_only = pbix_name in (schema_only_tables or set())
+
+        if is_schema_only:
+            result["row_count_diff_pct"] = None
+            result["notes"].append(
+                "Row count not available: PBIX DataModel is compressed; "
+                "column schema sourced from PBIT template."
+            )
+        elif twbx_rows == 0 and pbix_rows == 0:
             result["row_count_diff_pct"] = 0.0
         elif twbx_rows == 0:
             result["row_count_diff_pct"] = 100.0
@@ -367,15 +441,43 @@ class DataComparator:
         missing_in_pbix_norm = twbx_norm_set - pbix_norm_set
         missing_in_twbx_norm = pbix_norm_set - twbx_norm_set
 
-        # Report using original names for readability
-        result["columns_matched"] = sorted(
-            twbx_col_map[n] for n in matched_norm
-        )
+        # Exact-match results
+        result["columns_matched"] = sorted(twbx_col_map[n] for n in matched_norm)
+
+        # ── Fuzzy column fallback ───────────────────────────────────────
+        # Try to pair remaining unmatched columns by name similarity so that
+        # minor naming differences ("OrderID" ↔ "Order_ID", "SalesAmt" ↔
+        # "Sales_Amount") don't produce false "missing" failures.
+        unmatched_twbx_cols = [twbx_col_map[n] for n in missing_in_pbix_norm]
+        unmatched_pbix_cols  = [pbix_col_map[n]  for n in missing_in_twbx_norm]
+        fuzzy_col_pairs = _fuzzy_match_cols(unmatched_twbx_cols, unmatched_pbix_cols)
+
+        fuzzy_matched_twbx_norm: set = set()
+        fuzzy_matched_pbix_norm: set = set()
+        for tc, pc, score in fuzzy_col_pairs:
+            fn_t = _norm_col(tc)
+            fn_p = _norm_col(pc)
+            fuzzy_matched_twbx_norm.add(fn_t)
+            fuzzy_matched_pbix_norm.add(fn_p)
+            result["columns_matched"].append(tc)
+            if tc != pc:
+                note = (
+                    f"Column fuzzy matched: TWBX='{tc}' ↔ PBIX='{pc}' "
+                    f"(similarity {score:.0%})"
+                )
+                result["notes"].append(note)
+                if verbose:
+                    logger.info(f"[{display_name}] {note}")
+
+        result["columns_matched"] = sorted(set(result["columns_matched"]))
+
         result["columns_missing_in_pbix"] = sorted(
             twbx_col_map[n] for n in missing_in_pbix_norm
+            if n not in fuzzy_matched_twbx_norm
         )
         result["columns_missing_in_twbx"] = sorted(
             pbix_col_map[n] for n in missing_in_twbx_norm
+            if n not in fuzzy_matched_pbix_norm
         )
 
         if result["columns_missing_in_pbix"]:
@@ -392,17 +494,45 @@ class DataComparator:
                 f"{', '.join(result['columns_missing_in_twbx'])}"
             )
 
-        # Type comparison for matched columns (with equivalence map)
-        for norm_name in sorted(matched_norm):
-            twbx_orig = twbx_col_map[norm_name]
-            pbix_orig = pbix_col_map[norm_name]
+        # Type comparison for exact-matched columns (with equivalence map).
+        # Skipped for schema-only tables: columns came from a PBIT template
+        # (all-object dtype) and carry no real type information.
+        if not is_schema_only:
+            for norm_name in sorted(matched_norm):
+                twbx_orig = twbx_col_map[norm_name]
+                pbix_orig = pbix_col_map[norm_name]
 
-            twbx_dtype = str(twbx_df[twbx_orig].dtype)
-            pbix_dtype = str(pbix_df[pbix_orig].dtype)
+                twbx_dtype = str(twbx_df[twbx_orig].dtype)
+                pbix_dtype = str(pbix_df[pbix_orig].dtype)
 
+                if not are_types_compatible(twbx_dtype, pbix_dtype):
+                    mismatch = {
+                        "column": twbx_orig,
+                        "twbx_type": twbx_dtype,
+                        "pbix_type": pbix_dtype,
+                        "twbx_canonical": get_type_group(twbx_dtype),
+                        "pbix_canonical": get_type_group(pbix_dtype),
+                    }
+                    result["column_type_mismatches"].append(mismatch)
+                    result["result"] = "FAIL"
+                    result["failure_reasons"].append(
+                        f"Incompatible type for column '{twbx_orig}': "
+                        f"TWBX={twbx_dtype} ({get_type_group(twbx_dtype)}) "
+                        f"PBIX={pbix_dtype} ({get_type_group(pbix_dtype)})"
+                    )
+                    if verbose:
+                        logger.warning(
+                            f"[{display_name}.{twbx_orig}] Type incompatible: "
+                            f"{twbx_dtype} vs {pbix_dtype}"
+                        )
+
+        # Type comparison for fuzzy-matched columns (also skipped for schema-only)
+        for tc, pc, _score in ([] if is_schema_only else fuzzy_col_pairs):
+            twbx_dtype = str(twbx_df[tc].dtype)
+            pbix_dtype  = str(pbix_df[pc].dtype)
             if not are_types_compatible(twbx_dtype, pbix_dtype):
                 mismatch = {
-                    "column": twbx_orig,
+                    "column": tc,
                     "twbx_type": twbx_dtype,
                     "pbix_type": pbix_dtype,
                     "twbx_canonical": get_type_group(twbx_dtype),
@@ -411,13 +541,13 @@ class DataComparator:
                 result["column_type_mismatches"].append(mismatch)
                 result["result"] = "FAIL"
                 result["failure_reasons"].append(
-                    f"Incompatible type for column '{twbx_orig}': "
+                    f"Incompatible type for column '{tc}' (fuzzy matched to '{pc}'): "
                     f"TWBX={twbx_dtype} ({get_type_group(twbx_dtype)}) "
                     f"PBIX={pbix_dtype} ({get_type_group(pbix_dtype)})"
                 )
                 if verbose:
                     logger.warning(
-                        f"[{display_name}.{twbx_orig}] Type incompatible: "
+                        f"[{display_name}.{tc}↔{pc}] Type incompatible: "
                         f"{twbx_dtype} vs {pbix_dtype}"
                     )
             else:
@@ -446,6 +576,7 @@ class DataComparator:
         max_unique: int = 500,
         overlap_threshold_pct: float = 100.0,
         verbose: bool = False,
+        schema_only_tables: Optional[set] = None,
     ) -> Tuple[str, List[Dict[str, Any]]]:
         """
         Analyse actual data values in matched columns across matched tables.
@@ -502,30 +633,60 @@ class DataComparator:
                 })
                 continue
 
+            # Skip value analysis for schema-only tables (PBIX DataModel is
+            # compressed or data is in the remote Power BI Service — actual
+            # rows are unavailable, so value-overlap would always be 0 %).
+            if pbix_name in (schema_only_tables or set()):
+                results.append({
+                    "table_name": twbx_name,
+                    "twbx_name": twbx_name,
+                    "pbix_name": pbix_name,
+                    "result": "SKIPPED",
+                    "reason": (
+                        "Power BI data not available locally "
+                        "(remote dataset or compressed DataModel). "
+                        "Schema comparison was performed instead."
+                    ),
+                    "column_analyses": [],
+                    "columns_analyzed": 0,
+                    "mismatched_columns": 0,
+                    "failure_reasons": [],
+                    "twbx_row_count": len(twbx_tables[twbx_name]),
+                    "pbix_row_count": 0,
+                })
+                continue
+
             twbx_df = twbx_tables[twbx_name]
             pbix_df  = pbix_tables[pbix_name]
 
-            # Determine matched columns (same logic as compare_tables)
+            # Determine matched columns: exact normalisation + fuzzy fallback
             twbx_col_map: Dict[str, str] = {_norm_col(c): c for c in twbx_df.columns}
             pbix_col_map:  Dict[str, str] = {_norm_col(c): c for c in pbix_df.columns}
-            matched_norm = sorted(set(twbx_col_map.keys()) & set(pbix_col_map.keys()))
+            exact_matched_norm = sorted(
+                set(twbx_col_map.keys()) & set(pbix_col_map.keys())
+            )
+            missing_t = [twbx_col_map[n] for n in set(twbx_col_map) - set(pbix_col_map)]
+            missing_p = [pbix_col_map[n]  for n in set(pbix_col_map) - set(twbx_col_map)]
+            fuzzy_col_pairs_l3 = _fuzzy_match_cols(missing_t, missing_p)
+
+            # Build a unified list of (twbx_orig, pbix_orig) pairs to analyse
+            col_pairs: List[Tuple[str, str]] = [
+                (twbx_col_map[n], pbix_col_map[n]) for n in exact_matched_norm
+            ] + [(tc, pc) for tc, pc, _ in fuzzy_col_pairs_l3]
 
             table_result: Dict[str, Any] = {
                 "table_name": twbx_name,
                 "pbix_name":  pbix_name,
                 "result": "PASS",
                 "column_analyses": [],
-                "columns_analyzed": len(matched_norm),
+                "columns_analyzed": len(col_pairs),
                 "mismatched_columns": 0,
                 "failure_reasons": [],
                 "twbx_row_count": len(twbx_df),
                 "pbix_row_count": len(pbix_df),
             }
 
-            for norm_name in matched_norm:
-                twbx_orig = twbx_col_map[norm_name]
-                pbix_orig  = pbix_col_map[norm_name]
-
+            for twbx_orig, pbix_orig in col_pairs:
                 col_analysis = self._analyze_column_values(
                     twbx_df[twbx_orig],
                     pbix_df[pbix_orig],

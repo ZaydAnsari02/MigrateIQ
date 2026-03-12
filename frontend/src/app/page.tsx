@@ -300,8 +300,8 @@ function backendRunToValidationRun(run: any): ValidationRun {
 // real outcome.
 
 function deriveRunStatus(run: ValidationRun, pairs: ReportPair[]): ValidationRun {
-  // Already a terminal / accurate status — keep it
-  if (run.status === "FAIL" || run.status === "PASS" || run.status === "ERROR") return run;
+  // ERROR is always terminal — no recovery possible
+  if (run.status === "ERROR") return run;
 
   // String-coerce both sides — JSON may serialize the FK as int or string
   let runPairs = pairs.filter(p => p.runId != null && String(p.runId) === String(run.id));
@@ -319,8 +319,12 @@ function deriveRunStatus(run: ValidationRun, pairs: ReportPair[]): ValidationRun
     if (inWindow.length === 1) runPairs = inWindow;
   }
 
+  // No pairs found — fall back to the stored run status
   if (runPairs.length === 0) return run;
 
+  // Always derive from pairs: the stored run.status is set before L3 measure
+  // equivalence is evaluated, so it may say PASS even when L3 failed.
+  // The pairs' overallStatus is recomputed server-side including L3.
   const hasError = runPairs.some(p => (p.overallStatus ?? "").toUpperCase() === "ERROR");
   const hasFail  = runPairs.some(p => (p.overallStatus ?? "").toUpperCase() === "FAIL");
   const allPass  = runPairs.every(p => (p.overallStatus ?? "").toUpperCase() === "PASS");
