@@ -35,20 +35,43 @@ def _norm_table_name(name: str) -> str:
     return re.sub(r"[ _\-]+", "", name.lower().strip())
 
 
+def _tokenize_name(name: str) -> set:
+    """
+    Split a table name into meaningful word tokens.
+    Handles snake_case, kebab-case, space-separated, and camelCase names.
+    Single-character tokens are ignored.
+    """
+    # Split on separators first
+    parts = re.split(r"[ _\-]+", name.strip())
+    tokens: set = set()
+    for part in parts:
+        # Also split camelCase: "testMetrics" -> ["test", "Metrics"]
+        sub = re.sub(r"([a-z])([A-Z])", r"\1 \2", part).lower()
+        tokens.update(t for t in sub.split() if len(t) > 1)
+    return tokens
+
+
 def _name_similarity(a: str, b: str) -> float:
     """
     Return 0–1 similarity between two table names.
 
-    Tries two strategies and returns the maximum:
+    Tries three strategies and returns the maximum:
       1. Direct similarity on lowercased names (catches prefix/suffix diffs).
       2. Similarity after stripping separators (catches spacing/underscore diffs).
+      3. Jaccard token overlap (catches same words in different order or with extras).
     """
     a_lo, b_lo = a.lower().strip(), b.lower().strip()
     score1 = SequenceMatcher(None, a_lo, b_lo).ratio()
-    # Also compare normalised (separators removed) versions
+    # Compare normalised (separators removed) versions
     a_norm, b_norm = _norm_table_name(a), _norm_table_name(b)
     score2 = SequenceMatcher(None, a_norm, b_norm).ratio() if (a_norm and b_norm) else 0.0
-    return max(score1, score2)
+    # Token Jaccard overlap: "test_metrics" vs "dashboard_metrics" shares "metrics"
+    a_tokens, b_tokens = _tokenize_name(a), _tokenize_name(b)
+    if a_tokens and b_tokens:
+        score3 = len(a_tokens & b_tokens) / len(a_tokens | b_tokens)
+    else:
+        score3 = 0.0
+    return max(score1, score2, score3)
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +84,7 @@ def _name_similarity(a: str, b: str) -> float:
 #
 # A TWBX table and a PBIX table can only be matched once (greedy best-first).
 # ---------------------------------------------------------------------------
-FUZZY_THRESHOLD = 0.55     # minimum similarity to accept a fuzzy name match
+FUZZY_THRESHOLD = 0.45     # minimum similarity to accept a fuzzy name match
 OVERLAP_THRESHOLD = 0.4    # minimum column overlap ratio to accept a column match
 
 

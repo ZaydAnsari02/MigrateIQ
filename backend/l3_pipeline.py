@@ -121,7 +121,7 @@ def run_l3_validation(twbx_path: str, pbit_path: str) -> Dict[str, Any]:
     # ── 5. Overall status ─────────────────────────────────────────────────
     overall_status = (
         "PASS"
-        if judged and all(r["verdict"] == "PASS" for r in judged)
+        if not judged or all(r["verdict"] == "PASS" for r in judged)
         else "FAIL"
     )
 

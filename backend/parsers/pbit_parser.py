@@ -126,8 +126,9 @@ class PbitParser:
             for col in table.get("columns", []):
 
                 cname = col.get("name")
+                ctype = col.get("dataType", "string")
 
-                table_columns.append(cname)
+                table_columns.append({"name": cname, "dataType": ctype})
 
                 # calculated column
                 expr = col.get("expression")

@@ -90,6 +90,7 @@ def compare_reports(
     twbx_path: str,
     pbix_path: str,
     output_path: Optional[str],
+    pbit_path: Optional[str] = None,
     verbose: bool = False,
 ) -> int:
     """
@@ -99,6 +100,8 @@ def compare_reports(
         twbx_path:   Path to TWBX file.
         pbix_path:   Path to PBIX file.
         output_path: Explicit save path, or None to auto-route into results/.
+        pbit_path:   Optional path to .pbit file used as schema fallback when
+                     the PBIX DataModel is XPress9-compressed and unreadable.
         verbose:     Enable verbose logging.
 
     Returns:
@@ -151,6 +154,57 @@ def compare_reports(
             f"{len(pbix_measures)} measures, "
             f"{len(pbix_relationships)} relationships"
         )
+
+        # ── PBIT schema fallback for L2 (XPress9-compressed PBIX) ───────
+        # When the PBIX DataModel is XPress9-compressed the parser cannot
+        # read the full column schema — it falls back to Report/Layout which
+        # only contains columns referenced by visuals (often measures, not raw
+        # table columns).  The .pbit DataModelSchema is always plain JSON and
+        # has the authoritative table + column list, so we use it instead.
+        if pbit_path and pbix_parser.datamodel_xpress9:
+            import pandas as pd
+            from parsers.pbit_parser import PbitParser
+            try:
+                pbit_schema_parser = PbitParser(pbit_path)
+                pbit_schema_parser.parse()
+                pbit_schema = pbit_schema_parser.get_data_tables()  # Dict[str, List[Dict]]
+                pbit_schema_parser.cleanup()
+
+                # Map Power BI dataType strings to pandas dtypes so that type
+                # comparisons against the TWBX DataFrame don't produce false
+                # "type mismatch" failures on numeric columns.
+                _PBIT_DTYPE = {
+                    "int64":    "Int64",
+                    "double":   "float64",
+                    "decimal":  "float64",
+                    "boolean":  "bool",
+                    "dateTime": "datetime64[ns]",
+                    "string":   "object",
+                }
+
+                enriched = 0
+                for tname, col_info in pbit_schema.items():
+                    if col_info and isinstance(col_info[0], dict):
+                        dtype_map = {
+                            c["name"]: _PBIT_DTYPE.get(c.get("dataType", "string"), "object")
+                            for c in col_info
+                        }
+                        pbix_tables[tname] = pd.DataFrame({
+                            col: pd.array([], dtype=dtype)
+                            for col, dtype in dtype_map.items()
+                        })
+                    else:
+                        pbix_tables[tname] = pd.DataFrame(columns=col_info)
+                    enriched += 1
+
+                if enriched:
+                    logger.info(
+                        f"PBIT schema fallback applied: replaced {enriched} "
+                        f"table(s) with full column definitions from PBIT "
+                        f"(PBIX DataModel was XPress9-compressed)"
+                    )
+            except Exception as pbit_err:
+                logger.warning(f"PBIT schema fallback failed: {pbit_err}")
 
         # ── Compare data ────────────────────────────────────────────────
         logger.info("Comparing data...")
@@ -264,6 +318,16 @@ Examples:
         help="Path to the Power BI Desktop (.pbix) file",
     )
     parser.add_argument(
+        "--pbit",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Optional path to a Power BI Template (.pbit) file. "
+            "Used as a schema fallback for L2 column comparison when the "
+            "PBIX DataModel is XPress9-compressed and unreadable."
+        ),
+    )
+    parser.add_argument(
         "--output",
         default=None,
         metavar="PATH",
@@ -280,7 +344,7 @@ Examples:
     )
 
     args = parser.parse_args()
-    sys.exit(compare_reports(args.twbx, args.pbix, args.output, args.verbose))
+    sys.exit(compare_reports(args.twbx, args.pbix, args.output, args.pbit, args.verbose))
 
 
 if __name__ == "__main__":

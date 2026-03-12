@@ -24,6 +24,7 @@ class PbixParser:
         self.tables: Dict[str, Dict[str, Any]] = {}
         self._raw_datamodel: bytes = b""
         self._decoded_datamodel: str = ""  # UTF-16 decoded text (for VertiPaq binary)
+        self.datamodel_xpress9: bool = False  # True when DataModel is XPress9-compressed
 
     def parse(self) -> None:
         """Extract and parse PBIX file contents."""
@@ -120,6 +121,17 @@ class PbixParser:
                     self._try_extract_embedded_json(raw)
 
             else:
+                # Detect XPress9 compression: UTF-16 LE content without BOM.
+                # "This backup was created using XPress9 compression." is the header.
+                _xpress9_sig = b"T\x00h\x00i\x00s\x00 \x00b\x00a\x00c\x00k\x00u\x00p\x00"
+                if raw[:len(_xpress9_sig)] == _xpress9_sig:
+                    self.datamodel_xpress9 = True
+                    logger.warning(
+                        "DataModel is XPress9-compressed — table schema unavailable from DataModel. "
+                        "Will fall back to Report/Layout and PBIT if provided."
+                    )
+                    return
+
                 try:
                     content = raw.decode("utf-8", errors="ignore").lstrip("\ufeff")
                     if content.strip().startswith("{"):
@@ -233,8 +245,102 @@ class PbixParser:
         if not tables and self._raw_datamodel:
             tables = self._scan_tables_from_binary()
 
+        # Path 3 — Report/Layout fallback (handles XPress9-compressed DataModels)
+        # Newer Power BI Desktop files compress the DataModel with XPress9, which
+        # is unreadable without the Windows API.  The Report/Layout file is always
+        # plain UTF-16 LE JSON and contains every table/column referenced by visuals.
+        if not tables and self.temp_dir:
+            tables = self._extract_tables_from_layout()
+
         self.tables = tables
         logger.info(f"Extracted {len(tables)} tables from PBIX")
+        return tables
+
+    def _extract_tables_from_layout(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Extract table and column names referenced in Report/Layout.
+
+        Used as a last-resort fallback when the DataModel is XPress9-compressed
+        and cannot be decoded.  The layout JSON contains every Entity (table) and
+        Property (column) that visuals on the report reference, which is sufficient
+        for schema-level comparison even though row counts are unavailable.
+        """
+        layout_path = os.path.join(self.temp_dir, "Report", "Layout")
+        if not os.path.exists(layout_path):
+            logger.warning("Report/Layout not found — cannot fall back for table extraction")
+            return {}
+
+        try:
+            with open(layout_path, "rb") as f:
+                raw = f.read()
+            # Layout is always UTF-16 LE (with or without BOM)
+            text = raw.decode("utf-16-le", errors="replace").lstrip("\ufeff")
+            layout = json.loads(text)
+        except Exception as e:
+            logger.warning(f"Could not parse Report/Layout: {e}")
+            return {}
+
+        tables: Dict[str, Dict[str, Any]] = {}
+
+        def _walk(obj: Any) -> None:
+            if isinstance(obj, dict):
+                entity = obj.get("Entity") or obj.get("entity")
+                prop   = obj.get("Property") or obj.get("property")
+                if entity and isinstance(entity, str):
+                    if entity not in tables:
+                        tables[entity] = {
+                            "name": entity,
+                            "display_name": entity,
+                            "row_count": 0,
+                            "columns": [],
+                            "_col_set": set(),
+                        }
+                    if prop and isinstance(prop, str):
+                        if prop not in tables[entity]["_col_set"]:
+                            tables[entity]["_col_set"].add(prop)
+                            tables[entity]["columns"].append(
+                                {"name": prop, "data_type": "unknown", "is_hidden": False}
+                            )
+                # Also handle dot-notation queryRef: "test_metrics.Category"
+                for key in ("queryRef",):
+                    val = obj.get(key)
+                    if isinstance(val, str) and "." in val:
+                        tbl, col = val.split(".", 1)
+                        if tbl and col:
+                            if tbl not in tables:
+                                tables[tbl] = {
+                                    "name": tbl,
+                                    "display_name": tbl,
+                                    "row_count": 0,
+                                    "columns": [],
+                                    "_col_set": set(),
+                                }
+                            if col not in tables[tbl]["_col_set"]:
+                                tables[tbl]["_col_set"].add(col)
+                                tables[tbl]["columns"].append(
+                                    {"name": col, "data_type": "unknown", "is_hidden": False}
+                                )
+                for v in obj.values():
+                    _walk(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    _walk(item)
+            elif isinstance(obj, str) and 2 < len(obj) < 5000:
+                try:
+                    _walk(json.loads(obj))
+                except Exception:
+                    pass
+
+        _walk(layout)
+
+        # Clean up internal helper key
+        for tbl in tables.values():
+            tbl.pop("_col_set", None)
+
+        logger.info(
+            f"Extracted {len(tables)} table(s) from Report/Layout fallback: "
+            f"{list(tables.keys())}"
+        )
         return tables
 
     def _scan_tables_from_binary(self) -> Dict[str, Dict[str, Any]]:

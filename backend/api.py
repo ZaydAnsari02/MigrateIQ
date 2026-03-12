@@ -163,14 +163,18 @@ async def validate_reports(
         script_path = Path(__file__).parent / "compare_reports.py"
 
         # Run the comparison script
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--twbx", twbx_path,
+            "--pbix", pbix_path,
+            "--output", output_path,
+        ]
+        if pbit_path:
+            cmd += ["--pbit", pbit_path]
+
         proc = subprocess.run(
-            [
-                sys.executable,
-                str(script_path),
-                "--twbx", twbx_path,
-                "--pbix", pbix_path,
-                "--output", output_path,
-            ],
+            cmd,
             capture_output=True,
             text=True,
             cwd=str(BACKEND_DIR),
@@ -667,6 +671,7 @@ async def list_report_pairs(
             _mt  = _s.get("missing_in_twbx", [])
             if not l3_result_data.get("measure_results") and _tot == 0:
                 l3_result_data["description"] = "No measures found to compare."
+                l3_result_data["status"] = "PASS"
             elif l3_result_data.get("status") == "PASS":
                 l3_result_data["description"] = (
                     f"All {_tot} measure(s) are semantically equivalent between Tableau and Power BI."
@@ -939,6 +944,112 @@ async def list_runs(db: Session = Depends(get_db)):
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "MigrateIQ API"}
+
+
+# ─── POST /debug/parse-tables ──────────────────────────────────────────────────
+@app.post("/debug/parse-tables")
+async def debug_parse_tables(
+    twbx: UploadFile = File(...),
+    pbix: UploadFile = File(...),
+):
+    """
+    Debug endpoint: parse both files and return the raw table names found
+    in each, plus what _match_tables() produces.  Useful for diagnosing
+    why a table shows as 'unmatched' in L2.
+    """
+    import tempfile, shutil
+    from parsers.twbx_parser import TwbxParser
+    from parsers.pbix_parser import PbixParser
+    from comparators.data_comparator import _match_tables, _name_similarity
+
+    import tempfile, shutil as _shutil, zipfile as _zipfile
+    tmp = tempfile.mkdtemp()
+    try:
+        twbx_path = os.path.join(tmp, twbx.filename)
+        pbix_path = os.path.join(tmp, pbix.filename)
+        with open(twbx_path, "wb") as f:
+            shutil.copyfileobj(twbx.file, f)
+        with open(pbix_path, "wb") as f:
+            shutil.copyfileobj(pbix.file, f)
+
+        # ── PBIX zip inventory ────────────────────────────────────────────
+        pbix_zip_files = []
+        datamodel_header_hex = None
+        datamodel_size = None
+        try:
+            with _zipfile.ZipFile(pbix_path, "r") as zf:
+                pbix_zip_files = zf.namelist()
+                for name in zf.namelist():
+                    if name.endswith("DataModel") or name == "DataModel":
+                        info = zf.getinfo(name)
+                        datamodel_size = info.file_size
+                        with zf.open(name) as dm:
+                            first_bytes = dm.read(16)
+                        datamodel_header_hex = first_bytes.hex()
+        except Exception as ze:
+            pbix_zip_files = [f"zip read error: {ze}"]
+
+        tw = TwbxParser(twbx_path)
+        tw.parse()
+        twbx_tables = tw.get_data_tables()
+
+        pb = PbixParser(pbix_path)
+        pb.parse()
+        pbix_tables = pb.get_data_tables()
+
+        # ── Internal parser state diagnostics ────────────────────────────
+        pbix_raw_tables = pb.tables  # Dict[str, Dict] with name/columns/row_count
+        data_model_keys = list(pb.data_model.keys()) if pb.data_model else []
+        decoded_datamodel_len = len(pb._decoded_datamodel) if pb._decoded_datamodel else 0
+        raw_datamodel_len = len(pb._raw_datamodel) if pb._raw_datamodel else 0
+
+        # Similarity matrix between all pairs
+        similarity_matrix = []
+        for t in twbx_tables:
+            for p in pbix_tables:
+                similarity_matrix.append({
+                    "twbx": t,
+                    "pbix": p,
+                    "similarity": round(_name_similarity(t, p), 3),
+                })
+        similarity_matrix.sort(key=lambda x: -x["similarity"])
+
+        matches = _match_tables(twbx_tables, pbix_tables)
+
+        tw.cleanup()
+        pb.cleanup()
+
+        return {
+            "twbx_tables": {
+                name: {"rows": len(df), "columns": list(df.columns)}
+                for name, df in twbx_tables.items()
+            },
+            "pbix_tables": {
+                name: {"rows": len(df), "columns": list(df.columns)}
+                for name, df in pbix_tables.items()
+            },
+            "similarity_matrix": similarity_matrix[:30],
+            "match_results": matches,
+            # ── Diagnostics ──────────────────────────────────────────────
+            "pbix_diagnostics": {
+                "zip_contents": pbix_zip_files,
+                "datamodel_found": any("DataModel" in n for n in pbix_zip_files),
+                "datamodel_size_bytes": datamodel_size,
+                "datamodel_header_hex": datamodel_header_hex,
+                "data_model_json_keys": data_model_keys,
+                "decoded_datamodel_chars": decoded_datamodel_len,
+                "raw_datamodel_bytes": raw_datamodel_len,
+                "raw_tables_extracted": {
+                    name: {
+                        "columns": [c["name"] for c in info.get("columns", [])],
+                        "row_count": info.get("row_count"),
+                    }
+                    for name, info in pbix_raw_tables.items()
+                },
+            },
+        }
+    finally:
+        _shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ─── POST /login ──────────────────────────────────────────────────────────────
