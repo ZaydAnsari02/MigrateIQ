@@ -5,7 +5,8 @@ openpyxl==3.1.5
 lxml==4.9.3
 requests==2.31.0
 python-dateutil==2.8.2
-sqlalchemy 
+sqlalchemy
+pymssql
 python-dotenv
 fastapi
 uvicorn

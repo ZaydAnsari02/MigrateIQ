@@ -323,9 +323,12 @@ def init_db(db_url: str = "sqlite:///migrateiq.db") -> "Engine":
 def _migrate_columns(engine) -> None:
     """Add columns that exist in the model but are missing from the DB.
 
-    SQLite does not support IF NOT EXISTS on ALTER TABLE, so we check via
-    PRAGMA table_info and only issue the statement when the column is absent.
+    Only runs for SQLite (uses PRAGMA which is SQLite-specific).
+    For other databases, create_all() handles the full schema.
     """
+    if engine.dialect.name != "sqlite":
+        return
+
     from sqlalchemy import text
 
     migrations: dict[str, list[tuple[str, str]]] = {
