@@ -400,11 +400,15 @@ export function useExportReport() {
           // Key visual differences
           let keyDiffs: string[] = [];
           if (vis.aiKeyDifferences) {
-            try {
-              const parsed = JSON.parse(vis.aiKeyDifferences);
-              keyDiffs = Array.isArray(parsed) ? parsed.map(String) : [String(parsed)];
-            } catch {
-              keyDiffs = [vis.aiKeyDifferences];
+            if (Array.isArray(vis.aiKeyDifferences)) {
+              keyDiffs = vis.aiKeyDifferences.map(String);
+            } else {
+              try {
+                const parsed = JSON.parse(vis.aiKeyDifferences);
+                keyDiffs = Array.isArray(parsed) ? parsed.map(String) : [String(parsed)];
+              } catch {
+                keyDiffs = [vis.aiKeyDifferences];
+              }
             }
           }
 
