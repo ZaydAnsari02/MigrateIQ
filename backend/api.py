@@ -16,10 +16,10 @@ from datetime import datetime
 BACKEND_DIR = Path(__file__).parent.resolve()
 sys.path.append(str(BACKEND_DIR))
 
-from auth import USERS
+from auth import USERS, hash_password, verify_password
 import config  # loads .env via python-dotenv — must come before l3_pipeline
 from l3_pipeline import run_l3_validation
-from db.models import init_db, save_comparison_result, MigrationProject, ReportPair, ValidationRun, Status, VisualResult
+from db.models import init_db, save_comparison_result, MigrationProject, ReportPair, ValidationRun, Status, VisualResult, User
 from visual.pipeline import run_visual_validation
 
 # ─── Database Setup ───────────────────────────────────────────────────────────
@@ -63,16 +63,18 @@ app.mount("/screenshots", StaticFiles(directory=str(BACKEND_DIR / "screenshots")
 # ─── Startup Logic ────────────────────────────────────────────────────────────
 @app.on_event("startup")
 def startup_event():
-    # Ensure one project exists per user
     db = SessionLocal()
-    for username in USERS:
-        project = db.query(MigrationProject).filter(MigrationProject.owner == username).first()
-        if not project:
+    for username, password in USERS.items():
+        # Seed user into DB if not present
+        if not db.query(User).filter(User.username == username).first():
+            db.add(User(username=username, password_hash=hash_password(password)))
+        # Ensure one project exists per user
+        if not db.query(MigrationProject).filter(MigrationProject.owner == username).first():
             db.add(MigrationProject(
                 name="Default Migration Project",
                 client_name="AI Telekom",
                 description="Initial project for report validation",
-                owner=username
+                owner=username,
             ))
     db.commit()
     db.close()
@@ -100,11 +102,14 @@ SESSIONS: dict[str, str] = {}
 def get_current_username(
     x_token: Optional[str] = Header(None),
     x_username: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
 ) -> str:
     """Resolve username from session token or x-username header. Raises 401 if unrecognised."""
     username = SESSIONS.get(x_token) if x_token else None
-    if not username and x_username and x_username in USERS:
-        username = x_username
+    if not username and x_username:
+        user = db.query(User).filter(User.username == x_username).first()
+        if user:
+            username = x_username
     if not username:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return username
@@ -1105,22 +1110,9 @@ class LoginRequest(BaseModel):
     password: str
 
 @app.post("/login")
-def login(body: LoginRequest):
-    if body.username not in USERS or USERS[body.username] != body.password:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    token = str(uuid.uuid4())
-    SESSIONS[token] = body.username
-    return {"token": token, "username": body.username}
-# ─── POST /login ──────────────────────────────────────────────────────────────
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-@app.post("/login")
-def login(body: LoginRequest):
-    if body.username not in USERS or USERS[body.username] != body.password:
+def login(body: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == body.username).first()
+    if not user or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = str(uuid.uuid4())
