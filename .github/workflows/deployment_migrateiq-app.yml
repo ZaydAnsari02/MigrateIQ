@@ -29,11 +29,16 @@ jobs:
           npm install
           npm run build --if-present
 
+      - name: Prepare standalone deployment package
+        run: |
+          cp -r frontend/.next/static frontend/.next/standalone/.next/static
+          cp -r frontend/public frontend/.next/standalone/public
+
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
           name: node-app
-          path: frontend/
+          path: frontend/.next/standalone/
 
   deploy:
     runs-on: ubuntu-latest
@@ -53,3 +58,4 @@ jobs:
           slot-name: 'Production'
           package: .
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_A25B3853FFFD4211984CC6C82DD3A1AB }}
+          startup-command: 'node server.js'
