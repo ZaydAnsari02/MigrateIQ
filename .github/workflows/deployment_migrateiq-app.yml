@@ -32,7 +32,6 @@ jobs:
       - name: Prepare standalone deployment package
         run: |
           cp -r frontend/.next/static frontend/.next/standalone/.next/static
-          cp -r frontend/public frontend/.next/standalone/public
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
